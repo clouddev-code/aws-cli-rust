@@ -1470,3 +1470,109 @@ fn cli_input_yaml_and_exclusivity() {
             .contains("Only one --cli-input- parameter may be specified.")
     );
 }
+
+fn instances(states: &[&str]) -> Response {
+    let items: String = states
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            format!("<item><instanceId>i-{i}</instanceId><instanceState><name>{s}</name></instanceState></item>")
+        })
+        .collect();
+    ok(&format!(
+        "<DescribeInstancesResponse><reservationSet><item><instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>"
+    ))
+}
+
+#[test]
+fn waiters_poll_until_a_final_state() {
+    let args = [
+        "ec2",
+        "wait",
+        "instance-running",
+        "--instance-ids",
+        "i-0",
+        "i-1",
+    ];
+    let Some((r, sleeps)) = run_recording_sleeps(
+        &args,
+        vec![
+            instances(&["pending", "running"]),
+            instances(&["running", "running"]),
+        ],
+        default_env(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.requests.len(), 2);
+    assert!(body(&r.requests[0]).contains("Action=DescribeInstances"));
+    assert!(body(&r.requests[0]).contains("InstanceId.2=i-1"));
+    assert_eq!(sleeps, vec![std::time::Duration::from_secs(15)]);
+
+    // A failure acceptor ends the wait.
+    let (r, _) = run_recording_sleeps(
+        &args,
+        vec![instances(&["running", "terminated"])],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 255);
+    assert_eq!(
+        r.stderr,
+        "\nWaiter InstanceRunning failed: Waiter encountered a terminal failure state: \
+         For expression \"Reservations[].Instances[].State.Name\" we matched expected path: \
+         \"terminated\" at least once\n"
+    );
+
+    // An error no acceptor matches ends the wait; a matched one retries.
+    let err = |code: &str| {
+        status(
+            400,
+            &format!(
+                "<Response><Errors><Error><Code>{code}</Code><Message>m</Message></Error></Errors></Response>"
+            ),
+        )
+    };
+    let (r, _) = run_recording_sleeps(
+        &args,
+        vec![
+            err("InvalidInstanceID.NotFound"),
+            err("UnauthorizedOperation"),
+        ],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr.contains(
+            "Waiter InstanceRunning failed: An error occurred (UnauthorizedOperation): m"
+        ),
+        "{}",
+        r.stderr
+    );
+
+    // Status matchers, and giving up after maxAttempts.
+    let (r, sleeps) = run_recording_sleeps(
+        &["s3api", "wait", "bucket-exists", "--bucket", "b"],
+        (0..20).map(|_| status(404, "")).collect(),
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 255);
+    assert_eq!(r.requests.len(), 20);
+    assert_eq!(r.requests[0].method, "HEAD");
+    assert_eq!(sleeps.len(), 19);
+    assert!(
+        r.stderr.contains(
+            "Waiter BucketExists failed: Max attempts exceeded. Previously accepted state: \
+             Matched expected HTTP status code: 404"
+        ),
+        "{}",
+        r.stderr
+    );
+
+    let r = run(&["ec2", "wait", "bogus-state"], vec![]).unwrap();
+    assert_eq!(r.code, 252);
+}

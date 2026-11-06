@@ -27,4 +27,5 @@ pub mod timestamp;
 pub mod util;
 pub mod validate;
 pub mod value;
+pub mod waiter;
 pub mod yaml;

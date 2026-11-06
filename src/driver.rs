@@ -137,15 +137,59 @@ fn run_inner(
         }
         return Ok(());
     }
-    let op_name = commands
-        .iter()
-        .find(|c| c.cli_name == sub)
-        .map(|c| c.operation.as_str())
-        .ok_or_else(|| {
-            Failure::usage(format!(
-                "aws: error: argument operation: Invalid choice: '{sub}'"
-            ))
-        })?;
+    // `wait <waiter-name>` (customizations/waiters.py) runs the waiter's
+    // operation until it reaches a final state.
+    let waiters = ctx
+        .loader
+        .load_json(&dir, "waiters-2.json")
+        .ok()
+        .flatten()
+        .map(|doc| crate::waiter::waiters(&doc))
+        .unwrap_or_default();
+    let waiter = if sub == "wait" && !waiters.is_empty() {
+        let Some(name) = positionals.get(2).map(|s| s.as_str()) else {
+            return Err(Failure::usage(format!(
+                "aws: error: the following arguments are required: waiter name (try 'awsr {command} wait help')"
+            )));
+        };
+        if name == "help" {
+            let _ = writeln!(out, "Available waiters for {command}:");
+            for w in &waiters {
+                let _ = writeln!(out, "  {}", crate::waiter::waiter_cli_name(&w.name));
+            }
+            return Ok(());
+        }
+        let w = waiters
+            .iter()
+            .find(|w| crate::waiter::waiter_cli_name(&w.name) == name)
+            .cloned()
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "aws: error: argument subcommand: Invalid choice: '{name}'"
+                ))
+            })?;
+        Some(w)
+    } else {
+        None
+    };
+    // The command name customizations are keyed on, and where the
+    // operation's own arguments start.
+    let (cli_op, args_from) = match &waiter {
+        Some(w) => (crate::waiter::waiter_cli_name(&w.name), 3),
+        None => (sub.to_string(), 2),
+    };
+    let op_name = match &waiter {
+        Some(w) => w.operation.as_str(),
+        None => commands
+            .iter()
+            .find(|c| c.cli_name == sub)
+            .map(|c| c.operation.as_str())
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "aws: error: argument operation: Invalid choice: '{sub}'"
+                ))
+            })?,
+    };
     let op = model.operation(op_name).map_err(Failure::general)?;
 
     let paginator = ctx
@@ -169,9 +213,9 @@ fn run_inner(
             outfile: streaming_output.is_some() || select_output.is_some(),
         },
     );
-    crate::customize::customize_arg_table(command, sub, &mut table);
+    crate::customize::customize_arg_table(command, &cli_op, &mut table);
 
-    let op_tokens: Vec<String> = rest.iter().skip(2).cloned().collect();
+    let op_tokens: Vec<String> = rest.iter().skip(args_from).cloned().collect();
     if op_tokens.first().map(String::as_str) == Some("help") {
         print_op_help(&op, &table, out);
         return Ok(());
@@ -329,6 +373,16 @@ fn run_inner(
     }
 
     let client = build_client(ctx, &globals, &model, &op)?;
+    if let Some(w) = &waiter {
+        // Paging arguments are accepted but unused: the waiter calls the
+        // operation once per attempt.
+        return crate::waiter::wait(&client, w, &call_params, &*ctx.sleep, err).map_err(
+            |e| match e {
+                crate::waiter::WaitError::Failed(m) => Failure::general(format!("\n{m}")),
+                crate::waiter::WaitError::Client(e) => client_failure(e, &op.name),
+            },
+        );
+    }
     let call = |p: &Value, err: &mut dyn Write| {
         let mut v = client
             .call(op_name, p, None, err)
