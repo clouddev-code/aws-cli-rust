@@ -2,7 +2,7 @@
 //! parameters, resolve region/credentials/endpoint, sign, send, format.
 
 use crate::cli::params::{self, BinaryFormat, ParamContext};
-use crate::cli::{self, ArgDef, ArgKind, ArgTarget, ArgValue, Globals, UsageError};
+use crate::cli::{self, ArgTarget, ArgValue, Globals, UsageError};
 use crate::client::{self, ChecksumWhen, Client, ClientConfig, ClientError};
 use crate::credentials::Resolver;
 use crate::loader::Loader;
@@ -123,7 +123,7 @@ fn run_inner(
     })?;
     let model = ctx.loader.service_model(&dir).map_err(Failure::general)?;
 
-    let op_names: Vec<&str> = model.operation_names().collect();
+    let commands = crate::customize::operation_commands(&model, command);
     let Some(sub) = positionals.get(1).map(|s| s.as_str()) else {
         return Err(Failure::usage(format!(
             "aws: error: the following arguments are required: operation (try 'awsr {command} help')"
@@ -131,16 +131,15 @@ fn run_inner(
     };
     if sub == "help" {
         let _ = writeln!(out, "Available operations for {command}:");
-        let mut names: Vec<String> = op_names.iter().map(|n| cli_name(n)).collect();
-        names.sort();
-        for n in names {
-            let _ = writeln!(out, "  {n}");
+        for c in commands.iter().filter(|c| !c.hidden) {
+            let _ = writeln!(out, "  {}", c.cli_name);
         }
         return Ok(());
     }
-    let op_name = op_names
+    let op_name = commands
         .iter()
-        .find(|n| cli_name(n) == sub)
+        .find(|c| c.cli_name == sub)
+        .map(|c| c.operation.as_str())
         .ok_or_else(|| {
             Failure::usage(format!(
                 "aws: error: argument operation: Invalid choice: '{sub}'"
@@ -155,21 +154,21 @@ fn run_inner(
         .flatten()
         .and_then(|doc| PaginatorConfig::for_operation(&doc, op_name));
     let input = op.input();
-    let mut table = cli::arg_table(input.as_ref(), paginator.is_some(), globals.no_paginate);
     let streaming_output = op.streaming_output_member();
     // `S3SelectStreamOutputArgument`: the Records payloads of the event
     // stream go to the outfile.
     let select_output = (model.service_name == "s3" && op.name == "SelectObjectContent")
         .then(|| op.output().and_then(|o| o.payload().map(str::to_string)))
         .flatten();
-    if streaming_output.is_some() || select_output.is_some() {
-        table.push(ArgDef {
-            cli_name: "outfile".into(),
-            target: ArgTarget::Outfile,
-            kind: ArgKind::Positional,
-            required: true,
-        });
-    }
+    let mut table = cli::arg_table(
+        input.as_ref(),
+        &cli::TableOptions {
+            paginator: paginator.as_ref(),
+            no_paginate: globals.no_paginate,
+            outfile: streaming_output.is_some() || select_output.is_some(),
+        },
+    );
+    crate::customize::customize_arg_table(command, sub, &mut table);
 
     let op_tokens: Vec<String> = rest.iter().skip(2).cloned().collect();
     if op_tokens.first().map(String::as_str) == Some("help") {
@@ -214,7 +213,8 @@ fn run_inner(
     // Build parameters in model member order, like `_build_call_parameters`.
     let mut by_member: std::collections::HashMap<String, Value> = Default::default();
     let mut pagination = PaginationArgs::default();
-    let mut cli_input: Option<String> = None;
+    let mut cli_input: Option<(ArgTarget, String)> = None;
+    let mut skeleton: Option<String> = None;
     let mut outfile: Option<String> = None;
     for (idx, value) in &parsed {
         let def = &table[*idx];
@@ -249,7 +249,15 @@ fn run_inner(
                     ArgTarget::StartingToken => pagination.starting_token = Some(w),
                     ArgTarget::PageSize => pagination.page_size = Some(num(&w)?),
                     ArgTarget::MaxItems => pagination.max_items = Some(num(&w)?.max(0) as usize),
-                    ArgTarget::CliInputJson => cli_input = Some(w),
+                    ArgTarget::CliInputJson | ArgTarget::CliInputYaml => {
+                        if cli_input.is_some() {
+                            return Err(Failure::usage(
+                                "Only one --cli-input- parameter may be specified.",
+                            ));
+                        }
+                        cli_input = Some((target.clone(), w));
+                    }
+                    ArgTarget::GenerateCliSkeleton => skeleton = Some(w),
                     ArgTarget::Outfile => outfile = Some(w),
                     ArgTarget::Member(_) => unreachable!(),
                 }
@@ -265,8 +273,8 @@ fn run_inner(
             }
         }
     }
-    if let Some(raw) = cli_input {
-        merge_cli_input(&raw, &mut call_params, binary_format)?;
+    if let Some((target, raw)) = cli_input {
+        merge_cli_input(&target, &raw, &mut call_params, binary_format)?;
     }
     if let Some(shape) = &input {
         let missing: Vec<String> = shape
@@ -335,12 +343,17 @@ fn run_inner(
         })?,
     };
 
+    // A manual (undocumented) paging argument turns pagination off
+    // (`check_should_enable_pagination`), as does kinesis list-streams
+    // `--exclusive-start-stream-name` (kinesis.py).
     let user_gave_token = paginator.as_ref().is_some_and(|p| {
         p.input_tokens.iter().any(|t| call_params.get(t).is_some())
             || p.limit_key
                 .as_ref()
                 .is_some_and(|k| call_params.get(k).is_some())
-    });
+    }) || (command == "kinesis"
+        && op.name == "ListStreams"
+        && call_params.get("ExclusiveStartStreamName").is_some());
     let result = match &paginator {
         Some(cfg) if !globals.no_paginate && !user_gave_token => {
             paginate::paginate(cfg, &call_params, &pagination, |p| call(p, err))?
@@ -371,14 +384,22 @@ fn profile_name(ctx: &Context, globals: &Globals) -> String {
     })
 }
 
-/// `--cli-input-json`: fills in parameters not given on the command line.
+/// `--cli-input-json` / `--cli-input-yaml`: fills in parameters not given
+/// on the command line.
 fn merge_cli_input(
+    target: &ArgTarget,
     raw: &str,
     params: &mut crate::value::Map,
     binary_format: BinaryFormat,
 ) -> Result<(), Failure> {
+    let yaml = *target == ArgTarget::CliInputYaml;
+    let flag = if yaml {
+        "--cli-input-yaml"
+    } else {
+        "--cli-input-json"
+    };
     let pctx = ParamContext {
-        cli_name: "--cli-input-json",
+        cli_name: flag,
         binary_format,
     };
     let text =
@@ -387,15 +408,59 @@ fn merge_cli_input(
             Some(params::Loaded::Bytes(b)) => String::from_utf8_lossy(&b).into_owned(),
             None => raw.to_string(),
         };
-    let doc: J = serde_json::from_str(&text)
-        .map_err(|e| Failure::usage(format!("Invalid JSON received: {e}")))?;
+    let doc = if yaml {
+        yaml_rust2::YamlLoader::load_from_str(&text)
+            .ok()
+            .map(|docs| docs.first().map(yaml_to_json).unwrap_or(J::Null))
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "Error parsing parameter '{flag}': Invalid YAML received."
+                ))
+            })?
+    } else {
+        serde_json::from_str(&text).map_err(|_| {
+            Failure::usage(format!(
+                "Error parsing parameter '{flag}': Invalid JSON received."
+            ))
+        })?
+    };
     let J::Object(obj) = doc else {
-        return Err(Failure::usage("Invalid JSON received: expected an object"));
+        return Err(Failure::usage(format!(
+            "Error parsing parameter '{flag}': Invalid type: expecting map"
+        )));
     };
     for (k, v) in obj {
         params.entry(k).or_insert_with(|| Value::from_json(&v));
     }
     Ok(())
+}
+
+/// YAML safe-load result as JSON (mapping keys become strings).
+fn yaml_to_json(y: &yaml_rust2::Yaml) -> J {
+    use yaml_rust2::Yaml;
+    match y {
+        Yaml::Real(r) => r
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or_else(|| J::String(r.clone()), J::Number),
+        Yaml::Integer(i) => J::from(*i),
+        Yaml::String(s) => J::String(s.clone()),
+        Yaml::Boolean(b) => J::Bool(*b),
+        Yaml::Array(a) => J::Array(a.iter().map(yaml_to_json).collect()),
+        Yaml::Hash(h) => J::Object(
+            h.iter()
+                .map(|(k, v)| {
+                    let key = match yaml_to_json(k) {
+                        J::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (key, yaml_to_json(v))
+                })
+                .collect(),
+        ),
+        Yaml::Null | Yaml::Alias(_) | Yaml::BadValue => J::Null,
+    }
 }
 
 fn print_op_help(op: &Operation, table: &[cli::ArgDef], out: &mut dyn Write) {

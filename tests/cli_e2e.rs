@@ -73,20 +73,8 @@ fn run_with(
 ) -> Option<Run> {
     let loader = common::loader_or_skip()?;
     let transport = FakeTransport::new(responses);
-    let ctx = Context {
-        loader,
-        config,
-        env: Box::new(move |k| env.get(k).cloned()),
-        transport: &transport,
-        now: Box::new(|| Utc.with_ymd_and_hms(2015, 8, 30, 12, 36, 0).unwrap()),
-        uuid: Box::new(|| "00000000-0000-4000-8000-000000000000".to_string()),
-        prompt: Box::new(|_| None),
-        sleep: Box::new(|_| {}),
-        open_browser: Box::new(|_| false),
-        stdout_is_tty: false,
-        random: Box::new(|n| vec![7; n]),
-        callback: Box::new(|_| Err("no callback in tests".into())),
-    };
+    let mut ctx = test_context(loader, &transport, env);
+    ctx.config = config;
     let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = driver::run(&ctx, &argv, &mut out, &mut err);
@@ -97,6 +85,27 @@ fn run_with(
         stderr: String::from_utf8(err).unwrap(),
         requests: transport.requests.take(),
     })
+}
+
+fn test_context<'a>(
+    loader: awsr::loader::Loader,
+    transport: &'a FakeTransport,
+    env: HashMap<String, String>,
+) -> Context<'a> {
+    Context {
+        loader,
+        config: SharedConfig::default(),
+        env: Box::new(move |k| env.get(k).cloned()),
+        transport,
+        now: Box::new(|| Utc.with_ymd_and_hms(2015, 8, 30, 12, 36, 0).unwrap()),
+        uuid: Box::new(|| "00000000-0000-4000-8000-000000000000".to_string()),
+        prompt: Box::new(|_| None),
+        sleep: Box::new(|_| {}),
+        open_browser: Box::new(|_| false),
+        stdout_is_tty: false,
+        random: Box::new(|n| vec![7; n]),
+        callback: Box::new(|_| Err("no callback in tests".into())),
+    }
 }
 
 fn run(args: &[&str], responses: Vec<Response>) -> Option<Run> {
@@ -995,46 +1004,55 @@ fn s3_select_object_content_writes_records_to_outfile() {
 #[test]
 fn event_streams_in_rest_json_and_json_rpc_outputs() {
     // rest-json: the stream is the HTTP payload, other members are headers.
+    // The CLI removes lambda invoke-with-response-stream (removals.py), so
+    // the client is called directly.
+    let Some(loader) = common::loader_or_skip() else {
+        return;
+    };
     let mut body = event("PayloadChunk", b"hello ");
     body.extend(event("PayloadChunk", b"world"));
     body.extend(event("InvokeComplete", br#"{"LogResult":"bG9n"}"#));
-    let Some(r) = run(
-        &[
-            "lambda",
-            "invoke-with-response-stream",
-            "--function-name",
-            "f",
-        ],
-        vec![Response {
-            status: 200,
-            headers: vec![("X-Amz-Executed-Version".into(), "$LATEST".into())],
-            body,
-        }],
-    ) else {
-        return;
+    let transport = FakeTransport::new(vec![Response {
+        status: 200,
+        headers: vec![("X-Amz-Executed-Version".into(), "$LATEST".into())],
+        body,
+    }]);
+    let env = default_env();
+    let ctx = test_context(loader, &transport, env);
+    let model = ctx.loader.service_model("lambda").unwrap();
+    let config = awsr::client::ClientConfig {
+        region: "us-east-1".into(),
+        ..Default::default()
     };
-    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
-    let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let client = awsr::client::Client::new(&ctx, &model, config, None).unwrap();
+    let mut params = awsr::value::Map::new();
+    params.insert("FunctionName".into(), awsr::value::Value::Str("f".into()));
+    let v = client
+        .call(
+            "InvokeWithResponseStream",
+            &awsr::value::Value::Map(params),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    let out = v.to_json(awsr::value::TimestampStyle::Iso8601);
     assert_eq!(out["ExecutedVersion"], "$LATEST");
     assert_eq!(out["EventStream"][0]["PayloadChunk"]["Payload"], "aGVsbG8g");
     assert_eq!(out["EventStream"][2]["InvokeComplete"]["LogResult"], "bG9n");
+    drop(ctx);
 
     // json RPC: the first message is the initial response.
     let mut body = event("initial-response", b"{}");
     body.extend(event(
-        "SubscribeToShardEvent",
-        br#"{"Records":[],"ContinuationSequenceNumber":"1","MillisBehindLatest":0}"#,
+        "sessionStart",
+        br#"{"requestId":"r-1","sessionId":"s-1"}"#,
     ));
     let Some(r) = run(
         &[
-            "kinesis",
-            "subscribe-to-shard",
-            "--consumer-arn",
-            "arn:aws:kinesis:us-east-1:123456789012:stream/s/consumer/c:1",
-            "--shard-id",
-            "shardId-000000000000",
-            "--starting-position",
-            "Type=LATEST",
+            "logs",
+            "start-live-tail",
+            "--log-group-identifiers",
+            "arn:aws:logs:us-east-1:123456789012:log-group:g",
         ],
         vec![Response {
             status: 200,
@@ -1046,8 +1064,98 @@ fn event_streams_in_rest_json_and_json_rpc_outputs() {
     };
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
-    assert_eq!(
-        out["EventStream"][0]["SubscribeToShardEvent"]["ContinuationSequenceNumber"],
-        "1"
+    assert_eq!(out["responseStream"][0]["sessionStart"]["sessionId"], "s-1");
+}
+
+#[test]
+fn argument_renames_hidden_aliases_and_removed_commands() {
+    let image = |flag: &str| {
+        run(
+            &[
+                "ec2",
+                "create-image",
+                "--instance-id",
+                "i-1",
+                "--name",
+                "n",
+                flag,
+            ],
+            vec![ok(
+                "<CreateImageResponse><imageId>ami-1</imageId></CreateImageResponse>",
+            )],
+        )
+    };
+    // `ec2.create-image.no-no-reboot` is renamed to `--reboot`.
+    let Some(r) = image("--reboot") else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(body(&r.requests[0]).contains("NoReboot=false"));
+    let r = image("--no-reboot").unwrap();
+    assert!(body(&r.requests[0]).contains("NoReboot=true"));
+    let r = image("--no-no-reboot").unwrap();
+    assert_eq!(r.code, 252);
+    assert!(
+        r.stderr.contains("Unknown options: --no-no-reboot"),
+        "{}",
+        r.stderr
     );
+
+    // Hidden alias: the old spelling still works.
+    let r = run(
+        &[
+            "elasticache",
+            "create-replication-group",
+            "--replication-group-id",
+            "g",
+            "--replication-group-description",
+            "d",
+            "--preferred-cache-cluster-a-zs",
+            "us-east-1a",
+            "us-east-1b",
+        ],
+        vec![ok("<CreateReplicationGroupResponse><CreateReplicationGroupResult/></CreateReplicationGroupResponse>")],
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        body(&r.requests[0]).contains("PreferredCacheClusterAZs.AvailabilityZone.2=us-east-1b"),
+        "{}",
+        body(&r.requests[0])
+    );
+
+    // removals.py
+    let r = run(
+        &["ses", "verify-email-address", "--email-address", "a@b"],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains("Invalid choice: 'verify-email-address'"));
+
+    // signin.py: renamed, with the old name kept as a hidden alias.
+    let loader = common::loader_or_skip().unwrap();
+    let model = loader.service_model("signin").unwrap();
+    let cmds = awsr::customize::operation_commands(&model, "signin");
+    let find = |n: &str| cmds.iter().find(|c| c.cli_name == n).cloned();
+    assert!(!find("create-oauth2-token").unwrap().hidden);
+    assert!(find("create-o-auth2-token").unwrap().hidden);
+    assert!(find("create-oauth2-token-with-iam").is_some());
+    assert!(find("create-o-auth2-token-with-iam").is_none());
+}
+
+#[test]
+fn manual_paging_token_is_hidden_but_disables_pagination() {
+    let page = r#"<DescribeInstancesResponse><reservationSet/><nextToken>t2</nextToken></DescribeInstancesResponse>"#;
+    let Some(r) = run(
+        &["ec2", "describe-instances", "--next-token", "t1"],
+        vec![ok(page)],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.requests.len(), 1);
+    assert!(body(&r.requests[0]).contains("NextToken=t1"));
+    let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(out["NextToken"], "t2");
 }

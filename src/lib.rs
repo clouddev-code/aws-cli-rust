@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod context;
 pub mod credentials;
+pub mod customize;
 pub mod driver;
 pub mod endpoint;
 pub mod http;

@@ -73,10 +73,27 @@ fn every_operation_serializes() {
             unsupported_services.push(format!("{dir} ({proto})"));
             continue;
         }
-        for name in model.operation_names().collect::<Vec<_>>() {
+        let command = awsr::loader::command_for_dir(&dir);
+        for cmd in awsr::customize::operation_commands(&model, &command) {
+            let name = cmd.operation.as_str();
             let op = model.operation(name).unwrap();
             let input = op.input();
-            let table = arg_table(input.as_ref(), true, false);
+            let paginator = awsr::paginate::PaginatorConfig {
+                input_tokens: vec!["NextToken".into()],
+                output_tokens: vec![],
+                limit_key: Some("MaxResults".into()),
+                result_keys: vec!["x".into()],
+                more_results: None,
+                non_aggregate_keys: vec![],
+            };
+            let mut table = arg_table(
+                input.as_ref(),
+                &awsr::cli::TableOptions {
+                    paginator: Some(&paginator),
+                    ..Default::default()
+                },
+            );
+            awsr::customize::customize_arg_table(&command, &cmd.cli_name, &mut table);
             let mut seen = HashSet::new();
             for def in &table {
                 if !seen.insert(def.cli_name.clone()) {

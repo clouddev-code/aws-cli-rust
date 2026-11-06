@@ -30,6 +30,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
 sha2 = "0.10"
 ureq = "3"
+yaml-rust2 = { version = "0.13", default-features = false }
 
 # The data-driven tests evaluate ~14k endpoint rule cases and parse every
 # service model; optimizing dependencies keeps plain `cargo test` usable.
