@@ -19,6 +19,11 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+/// Nesting limit for CBOR and XML response bodies, matching serde_json's
+/// recursion limit for the JSON protocols. Decoding (CBOR) and dropping the
+/// tree (XML) recurse per level, so an unbounded body could overflow the stack.
+pub(crate) const MAX_DEPTH: usize = 128;
+
 /// Output of a serializer, before an endpoint is applied (botocore's
 /// request dict).
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -223,6 +223,7 @@ pub fn encode(v: &Value, shape: &Shape, out: &mut Vec<u8>) -> Result<()> {
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    depth: usize,
 }
 
 fn eof() -> ProtocolError {
@@ -287,6 +288,18 @@ impl Reader<'_> {
     }
 
     fn item(&mut self) -> Result<J> {
+        self.depth += 1;
+        if self.depth > super::MAX_DEPTH {
+            return Err(ProtocolError(
+                "CBOR response nested too deeply; this indicates a malformed CBOR response from the server".into(),
+            ));
+        }
+        let v = self.data_item();
+        self.depth -= 1;
+        v
+    }
+
+    fn data_item(&mut self) -> Result<J> {
         let initial = self.byte()?;
         let (major, info) = (initial >> 5, initial & 0x1f);
         Ok(match major {
@@ -397,7 +410,12 @@ pub fn decode(buf: &[u8]) -> Result<J> {
     if buf.is_empty() {
         return Ok(J::Null);
     }
-    Reader { buf, pos: 0 }.item()
+    Reader {
+        buf,
+        pos: 0,
+        depth: 0,
+    }
+    .item()
 }
 
 #[cfg(test)]
@@ -434,5 +452,15 @@ mod tests {
             decode(&out).unwrap(),
             serde_json::json!({"n": -300, "big": 1u64 << 40, "s": "hé", "l": [true, null]})
         );
+    }
+
+    #[test]
+    fn rejects_deep_nesting() {
+        // [[[...1...]]] at the limit decodes; a 1 MB body of 0x81 must error, not overflow.
+        let mut ok = vec![0x81; crate::protocol::MAX_DEPTH - 1];
+        ok.push(0x01);
+        assert!(decode(&ok).is_ok());
+        let deep = vec![0x81; 1 << 20];
+        assert!(decode(&deep).unwrap_err().0.contains("nested too deeply"));
     }
 }

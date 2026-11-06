@@ -65,7 +65,12 @@ pub fn parse(bytes: &[u8]) -> Result<Element, String> {
             .read_event_into(&mut buf)
             .map_err(|e| e.to_string())?
         {
-            Event::Start(e) => stack.push(start_element(&e)?),
+            Event::Start(e) => {
+                if stack.len() >= super::MAX_DEPTH {
+                    return Err("XML nested too deeply".into());
+                }
+                stack.push(start_element(&e)?)
+            }
             Event::Empty(e) => {
                 let el = start_element(&e)?;
                 match stack.last_mut() {
@@ -118,5 +123,14 @@ mod tests {
         assert_eq!(el.child("B").unwrap().text, "t & u");
         assert_eq!(el.child("B").unwrap().attr("a"), Some("1"));
         assert!(el.child("C").is_some());
+    }
+
+    #[test]
+    fn rejects_deep_nesting() {
+        let n = crate::protocol::MAX_DEPTH;
+        let ok = format!("{}{}", "<a>".repeat(n), "</a>".repeat(n));
+        assert!(parse(ok.as_bytes()).is_ok());
+        let deep = "<a>".repeat(1 << 18);
+        assert_eq!(parse(deep.as_bytes()).unwrap_err(), "XML nested too deeply");
     }
 }
