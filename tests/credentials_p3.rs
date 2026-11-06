@@ -185,6 +185,7 @@ impl<'a> Setup<'a> {
                 true
             }),
             stdout_is_tty: false,
+            terminal_width: None,
             random: Box::new(|n| (0..n).map(|i| (i * 31 + 7) as u8).collect()),
             callback: Box::new(move |_| match &code {
                 Some(c) => Ok(Box::new(FakeCallback {
@@ -825,6 +826,7 @@ fn pager_selection() {
         sleep: Box::new(|_| {}),
         open_browser: Box::new(|_| false),
         stdout_is_tty: true,
+        terminal_width: None,
         random: Box::new(|n| vec![7; n]),
         callback: Box::new(|_| Err("no callback in tests".into())),
     };

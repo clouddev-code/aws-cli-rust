@@ -24,8 +24,11 @@ pub struct Context<'a> {
     pub sleep: Box<dyn Fn(Duration) + 'a>,
     /// Open a URL in a browser; returns false if that was not possible.
     pub open_browser: Box<dyn Fn(&str) -> bool + 'a>,
-    /// Whether stdout is a terminal (enables the pager).
+    /// Whether stdout is a terminal (enables the pager and table colors).
     pub stdout_is_tty: bool,
+    /// Terminal width for `--output table`; `None` when stdout is not a
+    /// terminal (awscli then assumes 80 columns).
+    pub terminal_width: Option<usize>,
     /// Cryptographically secure random bytes (PKCE, DPoP keys).
     pub random: Box<dyn Fn(usize) -> Vec<u8> + 'a>,
     /// Starts the local OAuth redirect receiver (`login`, `sso login`).

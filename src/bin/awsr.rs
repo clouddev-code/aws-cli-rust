@@ -97,6 +97,22 @@ fn open_browser(url: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// `determine_terminal_width`: the width of the terminal on stdout.
+fn terminal_width() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut ws = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+        // SAFETY: TIOCGWINSZ fills a winsize struct on success.
+        let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) };
+        if ok == 0 {
+            // SAFETY: initialized by the successful ioctl above.
+            let ws = unsafe { ws.assume_init() };
+            return (ws.ws_col > 0).then_some(ws.ws_col as usize);
+        }
+    }
+    None
+}
+
 fn timeout(args: &[String], flag: &str) -> Option<Duration> {
     let pos = args.iter().position(|a| a == flag)?;
     let secs: u64 = args.get(pos + 1)?.parse().ok()?;
@@ -128,6 +144,7 @@ fn main() {
         sleep: Box::new(std::thread::sleep),
         open_browser: Box::new(open_browser),
         stdout_is_tty: std::io::stdout().is_terminal(),
+        terminal_width: terminal_width(),
         random: Box::new(awsr::oauth::os_random),
         callback: Box::new(awsr::oauth::LocalCallbackServer::bind),
     };

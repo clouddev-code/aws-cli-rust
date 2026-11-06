@@ -338,9 +338,25 @@ fn run_inner(
         None => OutputFormat::Json,
         Some(f) => OutputFormat::parse(&f).ok_or_else(|| {
             Failure::usage(format!(
-                "aws: error: argument --output: Invalid choice: '{f}' (choose from json, text, off)"
+                "aws: error: argument --output: Invalid choice: '{f}' (choose from {})",
+                output::FORMAT_NAMES.join(", ")
             ))
         })?,
+    };
+    let color = match globals.color.as_deref() {
+        None | Some("auto") => ctx.stdout_is_tty,
+        Some("on") => true,
+        Some("off") => false,
+        Some(other) => {
+            return Err(Failure::usage(format!(
+                "aws: error: argument --color: Invalid choice: '{other}' (choose from on, off, auto)"
+            )));
+        }
+    };
+    let table_style = output::TableStyle {
+        title: op.name.clone(),
+        terminal_width: ctx.terminal_width.unwrap_or(80),
+        color,
     };
 
     // A manual (undocumented) paging argument turns pagination off
@@ -366,7 +382,7 @@ fn run_inner(
         None => result,
     };
     let mut rendered = Vec::new();
-    output::write(format, &result, &mut rendered).map_err(Failure::general)?;
+    output::write(format, &result, &table_style, &mut rendered).map_err(Failure::general)?;
     emit(ctx, &globals, &profile_name(ctx, &globals), &rendered, out).map_err(Failure::general)
 }
 
