@@ -58,8 +58,10 @@ set -x AWS_PROFILE dev
 
 対応している主な機能:
 
-- プロトコル: query, ec2, json, rest-json, rest-xml
-- SigV4 署名 (S3 フレーバーを含む)、エンドポイントルールエンジン
+- プロトコル: query, ec2, json, rest-json, rest-xml, smithy-rpc-v2-cbor、event stream (S3 Select など)
+- SigV4 署名 (S3 フレーバーを含む)、SigV4a (S3 マルチリージョンアクセスポイント、EventBridge グローバルエンドポイントなど)、エンドポイントルールエンジン
+- フレキシブルチェックサム: 既定で CRC64NVME (PutObject / UploadPart は aws-chunked トレーラ)、`--checksum-algorithm`、GetObject のレスポンス検証。`request_checksum_calculation` / `response_checksum_validation` (`AWS_REQUEST_CHECKSUM_CALCULATION` / `AWS_RESPONSE_CHECKSUM_VALIDATION`) と `sigv4a_signing_region_set` に対応
+- `outfile` 位置引数 (`s3api get-object ... out.bin`、`s3api select-object-content ... out.csv`)
 - 認証情報 (本家と同じ順序): 環境変数、assume-role (`source_profile` / `credential_source` / MFA / ロールチェーン)、web identity、IAM Identity Center (SSO)、`aws login` セッション、`~/.aws/credentials`、`credential_process`、`~/.aws/config`、コンテナ、EC2 インスタンスメタデータ (IMDSv2)
 - 一時認証情報は本家と同じ `~/.aws/cli/cache` / `~/.aws/sso/cache` / `~/.aws/login/cache` を読み書きするので、本家 `aws` とキャッシュを共有できます
 - `login` (ブラウザ + PKCE、`--remote` でコード貼り付け) — 本家 `aws login` と同じキャッシュとプロファイル設定 (`login_session`) を作成
@@ -72,4 +74,4 @@ set -x AWS_PROFILE dev
 
 ## ライセンス
 
-Apache-2.0。`tests/fixtures/` 以下は aws-cli / botocore のテストフィクスチャ (Apache-2.0) の複製です。
+Apache-2.0。`tests/fixtures/` 以下は aws-cli / botocore のテストフィクスチャ (Apache-2.0) の複製です。`tests/fixtures/aws-signing-test-suite-v4a/` は aws-c-auth (Apache-2.0、同ディレクトリに LICENSE を同梱) のテストスイートの複製です。

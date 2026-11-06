@@ -15,10 +15,12 @@ path = "src/bin/awsr.rs"
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+crc32fast = "1"
 hex = "0.4"
 hmac = "0.12"
 indexmap = "2"
 jmespath = "0.5"
+libc = "0.2"
 md-5 = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 quick-xml = "0.42"

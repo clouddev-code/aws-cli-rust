@@ -2,6 +2,7 @@
 //! sending and parsing for one service. Used by the CLI driver and by the
 //! credential providers (STS, SSO, SSO-OIDC, Sign-In).
 
+use crate::checksum;
 use crate::context::Context;
 use crate::endpoint::RuleSet;
 use crate::http::Request;
@@ -12,7 +13,9 @@ use crate::protocol::ser;
 use crate::sigv4::{Credentials, Signer};
 use crate::value::{TimestampStyle, Value};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Map, Value as J};
+use std::borrow::Cow;
 use std::io::Write;
 
 pub const USER_AGENT: &str = concat!("aws-cli-rust/", env!("CARGO_PKG_VERSION"), " awsr");
@@ -49,6 +52,27 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
+/// `request_checksum_calculation` / `response_checksum_validation`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChecksumWhen {
+    #[default]
+    WhenSupported,
+    WhenRequired,
+}
+
+impl ChecksumWhen {
+    /// Parse a config value (`_handle_checksum_config`).
+    pub fn parse(key: &str, value: &str) -> Result<Self, String> {
+        match value.to_lowercase().as_str() {
+            "when_supported" => Ok(ChecksumWhen::WhenSupported),
+            "when_required" => Ok(ChecksumWhen::WhenRequired),
+            other => Err(format!(
+                "Unsupported configuration value for {key}. Expected one of ('when_supported', 'when_required') but got {other}."
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ClientConfig {
     pub region: String,
@@ -56,6 +80,10 @@ pub struct ClientConfig {
     pub use_fips: bool,
     pub use_dualstack: bool,
     pub debug: bool,
+    pub request_checksum_calculation: ChecksumWhen,
+    pub response_checksum_validation: ChecksumWhen,
+    /// `sigv4a_signing_region_set`
+    pub sigv4a_signing_region_set: Option<String>,
 }
 
 pub struct Client<'a> {
@@ -107,6 +135,7 @@ impl<'a> Client<'a> {
             .model
             .operation(op_name)
             .map_err(|e| ClientError::Other(e.to_string()))?;
+        let params = &self.with_validation_mode(&op, params);
         let endpoint = RuleSet::new(&self.rules, &self.partitions)
             .resolve(&self.endpoint_params(&op, params))
             .map_err(|e| ClientError::Endpoint(e.to_string()))?;
@@ -121,17 +150,33 @@ impl<'a> Client<'a> {
             req.set_header(name, joined);
         }
         req.set_header("User-Agent", USER_AGENT);
-        add_checksum(&op, &mut req);
+        let request_checksum = self.request_checksum(&op, params, &req)?;
+        let payload = request_checksum
+            .as_ref()
+            .and_then(|c| apply_request_checksum(c, &mut req));
 
         if let Some(creds) = &self.credentials
             && !is_unsigned(&op)
         {
-            let (signing_name, signing_region, s3) = self.signing_context(&endpoint.properties)?;
+            let signing = self.signing_context(&op, &endpoint.properties)?;
+            let s3 = signing.s3;
+            let payload = payload.or_else(|| {
+                // S3 skips payload signing for streaming uploads that carry a
+                // checksum over TLS (`S3SigV4Auth._should_sha256_sign_payload`).
+                let checksummed = req.has_header("Content-MD5")
+                    || request_checksum
+                        .as_ref()
+                        .is_some_and(|c| req.has_header(&c.algorithm.header()));
+                (s3 && req.scheme == "https" && checksummed && op.has_streaming_input())
+                    .then_some(crate::sigv4::UNSIGNED_PAYLOAD)
+            });
             let signer = Signer {
                 credentials: creds,
-                region: &signing_region,
-                service: &signing_name,
+                region: &signing.region,
+                service: &signing.name,
                 s3,
+                payload,
+                asymmetric: signing.asymmetric,
             };
             let sig = signer.sign(&mut req, (self.ctx.now)());
             if self.config.debug {
@@ -163,6 +208,9 @@ impl<'a> Client<'a> {
                 String::from_utf8_lossy(&resp.body)
             );
         }
+        if resp.status < 300 {
+            self.validate_response_checksum(&op, params, &resp)?;
+        }
         rparse::parse(&op, &resp).map_err(|e| match e {
             ParseError::Service(s) => ClientError::Service(s),
             other => ClientError::Other(other.to_string()),
@@ -186,17 +234,6 @@ impl<'a> Client<'a> {
         Ok(format!("{}://{}", req.scheme, req.host))
     }
 
-    /// Like [`Client::call`] but returns output JSON (CLI rendering).
-    pub fn call_json(
-        &self,
-        op_name: &str,
-        params: &Value,
-        log: &mut dyn Write,
-    ) -> Result<J, ClientError> {
-        self.call(op_name, params, None, log)
-            .map(|v| v.to_json(TimestampStyle::Iso8601))
-    }
-
     fn endpoint_params(&self, op: &Operation, params: &Value) -> Map<String, J> {
         let rs = RuleSet::new(&self.rules, &self.partitions);
         let input = op.input();
@@ -217,48 +254,91 @@ impl<'a> Client<'a> {
         out
     }
 
-    /// Signing name/region from the endpoint `authSchemes`, else the model.
+    /// Signing name, region (the region set for SigV4a), S3 flavour and
+    /// algorithm. The endpoint `authSchemes` win over the model `auth` trait;
+    /// in both the first supported entry is used
+    /// (`auth_schemes_to_signing_ctx`, `resolve_auth_type`).
     fn signing_context(
         &self,
+        op: &Operation,
         props: &Map<String, J>,
-    ) -> Result<(String, String, bool), ClientError> {
-        let mut name = self.model.signing_name().to_string();
-        let mut region = self.config.region.clone();
+    ) -> Result<SigningContext, ClientError> {
+        let mut ctx = SigningContext {
+            name: self.model.signing_name().to_string(),
+            region: self.config.region.clone(),
+            s3: false,
+            asymmetric: false,
+        };
+        let mut region_set: Option<String> = None;
         let mut disable_double_encoding = false;
         if let Some(schemes) = props.get("authSchemes").and_then(J::as_array) {
-            let named = |n: &str| {
-                schemes
+            let scheme = schemes.iter().find(|s| {
+                matches!(
+                    s.get("name").and_then(J::as_str),
+                    Some("sigv4" | "sigv4a" | "sigv4-s3express")
+                )
+            });
+            let Some(s) = scheme else {
+                let names: Vec<&str> = schemes
                     .iter()
-                    .find(|s| s.get("name").and_then(J::as_str) == Some(n))
+                    .filter_map(|s| s.get("name").and_then(J::as_str))
+                    .collect();
+                return Err(ClientError::Other(format!(
+                    "unsupported auth scheme(s): {}",
+                    names.join(", ")
+                )));
             };
-            match named("sigv4").or_else(|| named("sigv4-s3express")) {
-                Some(s) => {
-                    if let Some(n) = s.get("signingName").and_then(J::as_str) {
-                        name = n.to_string();
-                    }
-                    if let Some(r) = s.get("signingRegion").and_then(J::as_str) {
-                        region = r.to_string();
-                    }
-                    disable_double_encoding = s
-                        .get("disableDoubleEncoding")
-                        .and_then(J::as_bool)
-                        .unwrap_or(false);
-                }
-                None => {
-                    let names: Vec<&str> = schemes
-                        .iter()
-                        .filter_map(|s| s.get("name").and_then(J::as_str))
-                        .collect();
-                    return Err(ClientError::Other(format!(
-                        "unsupported auth scheme(s): {}",
-                        names.join(", ")
-                    )));
-                }
+            ctx.asymmetric = s.get("name").and_then(J::as_str) == Some("sigv4a");
+            if let Some(n) = s.get("signingName").and_then(J::as_str) {
+                ctx.name = n.to_string();
             }
+            if let Some(r) = s.get("signingRegion").and_then(J::as_str) {
+                ctx.region = r.to_string();
+                region_set = Some(r.to_string());
+            } else if let Some(set) = s.get("signingRegionSet").and_then(J::as_array)
+                && !set.is_empty()
+            {
+                region_set = Some(
+                    set.iter()
+                        .filter_map(J::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+            disable_double_encoding = s
+                .get("disableDoubleEncoding")
+                .and_then(J::as_bool)
+                .unwrap_or(false);
+        } else {
+            let auth = op
+                .get("auth")
+                .or_else(|| self.model.metadata().get("auth"))
+                .and_then(J::as_array);
+            ctx.asymmetric = auth.and_then(|a| {
+                a.iter()
+                    .filter_map(J::as_str)
+                    .find(|t| matches!(*t, "aws.auth#sigv4" | "aws.auth#sigv4a"))
+            }) == Some("aws.auth#sigv4a");
         }
-        let s3 = disable_double_encoding || name.starts_with("s3");
-        Ok((name, region, s3))
+        if ctx.asymmetric {
+            // `_resolve_sigv4a_region`
+            ctx.region = self
+                .config
+                .sigv4a_signing_region_set
+                .clone()
+                .or(region_set)
+                .unwrap_or_else(|| "*".into());
+        }
+        ctx.s3 = disable_double_encoding || ctx.name.starts_with("s3");
+        Ok(ctx)
     }
+}
+
+struct SigningContext {
+    name: String,
+    region: String,
+    s3: bool,
+    asymmetric: bool,
 }
 
 /// staticContextParams, contextParams and operationContextParams.
@@ -306,31 +386,178 @@ fn context_param(
     None
 }
 
-/// Content-MD5 for operations that require a checksum (S3 PutBucket*...).
-fn add_checksum(op: &Operation, req: &mut Request) {
-    let required = op
-        .get("httpChecksumRequired")
-        .and_then(J::as_bool)
-        .unwrap_or(false)
-        || op
-            .get("httpChecksum")
-            .and_then(|c| c.get("requestChecksumRequired"))
-            .and_then(J::as_bool)
-            .unwrap_or(false);
-    if required
-        && !req.has_header("Content-MD5")
-        && !req
-            .headers
-            .iter()
-            .any(|(k, _)| k.to_lowercase().starts_with("x-amz-checksum-"))
-    {
-        use md5::Digest;
-        let digest = md5::Md5::digest(&req.body);
-        req.set_header(
-            "Content-MD5",
-            base64::engine::general_purpose::STANDARD.encode(digest),
-        );
+/// Where a request checksum goes (`checksum_context["request_algorithm"]`).
+#[derive(Debug, Clone)]
+struct RequestChecksum {
+    algorithm: checksum::Algorithm,
+    trailer: bool,
+    /// Header of the `requestAlgorithmMember`, set to the default algorithm
+    /// when the caller did not choose one (`request_algorithm_header`).
+    member_header: Option<String>,
+}
+
+/// Add the checksum header, or re-encode the body as aws-chunked with a
+/// trailer. Returns the payload hash a trailer requires.
+fn apply_request_checksum(c: &RequestChecksum, req: &mut Request) -> Option<&'static str> {
+    if let Some(h) = &c.member_header {
+        req.set_header(h, c.algorithm.name().to_uppercase());
     }
+    let name = c.algorithm.header();
+    if !c.trailer {
+        if !req.has_header(&name) {
+            req.set_header(&name, c.algorithm.b64digest(&req.body));
+        }
+        return None;
+    }
+    let encoding = match req.header("Content-Encoding") {
+        Some(e) => format!("{e},aws-chunked"),
+        None => "aws-chunked".into(),
+    };
+    req.set_header("Content-Encoding", encoding);
+    req.set_header("X-Amz-Trailer", name);
+    req.set_header("X-Amz-Decoded-Content-Length", req.body.len().to_string());
+    req.remove_header("Content-Length");
+    // The body is in memory, so it is sent with its encoded Content-Length
+    // rather than `Transfer-Encoding: chunked`.
+    req.body = checksum::aws_chunked(&req.body, c.algorithm);
+    Some(crate::sigv4::STREAMING_UNSIGNED_PAYLOAD_TRAILER)
+}
+
+impl Client<'_> {
+    /// `_handle_request_validation_mode_member`: opt into response checksum
+    /// validation by default.
+    fn with_validation_mode<'p>(&self, op: &Operation, params: &'p Value) -> Cow<'p, Value> {
+        let member = op
+            .get("httpChecksum")
+            .and_then(|c| c.get("requestValidationModeMember"))
+            .and_then(J::as_str);
+        match (member, params) {
+            (Some(m), Value::Map(map))
+                if self.config.response_checksum_validation == ChecksumWhen::WhenSupported
+                    && !map.contains_key(m) =>
+            {
+                let mut map = map.clone();
+                map.insert(m.to_string(), Value::Str("ENABLED".into()));
+                Cow::Owned(Value::Map(map))
+            }
+            (Some(m), Value::Null)
+                if self.config.response_checksum_validation == ChecksumWhen::WhenSupported =>
+            {
+                let mut map = crate::value::Map::new();
+                map.insert(m.to_string(), Value::Str("ENABLED".into()));
+                Cow::Owned(Value::Map(map))
+            }
+            _ => Cow::Borrowed(params),
+        }
+    }
+
+    /// `resolve_request_checksum_algorithm`; sets the algorithm member header
+    /// when the default algorithm is chosen.
+    fn request_checksum(
+        &self,
+        op: &Operation,
+        params: &Value,
+        req: &Request,
+    ) -> Result<Option<RequestChecksum>, ClientError> {
+        if req.headers.iter().any(|(k, _)| is_checksum_header(k)) {
+            return Ok(None);
+        }
+        let hc = op.get("httpChecksum");
+        let required = op
+            .get("httpChecksumRequired")
+            .and_then(J::as_bool)
+            .unwrap_or(false)
+            || hc
+                .and_then(|c| c.get("requestChecksumRequired"))
+                .and_then(J::as_bool)
+                .unwrap_or(false);
+        let member = hc
+            .and_then(|c| c.get("requestAlgorithmMember"))
+            .and_then(J::as_str);
+        let (algorithm, member_header) = match member.and_then(|m| params.get(m)) {
+            Some(v) => {
+                let name = v.as_str().unwrap_or_default().to_lowercase();
+                let alg = checksum::Algorithm::from_name(&name).ok_or_else(|| {
+                    ClientError::Other(format!("Unsupported checksum algorithm: {name}"))
+                })?;
+                (alg, None)
+            }
+            None if required
+                || (member.is_some()
+                    && self.config.request_checksum_calculation == ChecksumWhen::WhenSupported) =>
+            {
+                let header = member
+                    .and_then(|m| op.input()?.member_named(m))
+                    .and_then(|s| s.ser_name().map(str::to_string));
+                (checksum::DEFAULT, header)
+            }
+            None => return Ok(None),
+        };
+        Ok(Some(RequestChecksum {
+            algorithm,
+            trailer: op.has_streaming_input() && req.scheme == "https",
+            member_header,
+        }))
+    }
+
+    /// `handle_checksum_body` for in-memory bodies.
+    fn validate_response_checksum(
+        &self,
+        op: &Operation,
+        params: &Value,
+        resp: &crate::http::Response,
+    ) -> Result<(), ClientError> {
+        let Some(hc) = op.get("httpChecksum") else {
+            return Ok(());
+        };
+        let enabled = hc
+            .get("requestValidationModeMember")
+            .and_then(J::as_str)
+            .is_some_and(|m| params.get(m).is_some());
+        if !enabled {
+            return Ok(());
+        }
+        let offered: Vec<String> = hc
+            .get("responseAlgorithms")
+            .and_then(J::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(J::as_str)
+                    .map(str::to_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for alg in checksum::PRIORITY {
+            if !offered.iter().any(|o| o == alg.name()) {
+                continue;
+            }
+            let Some(expected) = resp.header(&alg.header()) else {
+                continue;
+            };
+            // Composite (multipart) checksums end in `-<parts>`.
+            if expected.contains('-') {
+                continue;
+            }
+            let mut h = alg.hasher();
+            h.update(&resp.body);
+            let digest = h.digest();
+            if B64.decode(expected).ok().as_deref() != Some(digest.as_slice()) {
+                return Err(ClientError::Other(format!(
+                    "Expected checksum {expected} did not match calculated checksum: {}",
+                    B64.encode(&digest)
+                )));
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+}
+
+/// `CHECKSUM_HEADER_PATTERN`: `x-amz-checksum-[a-z0-9]*`.
+fn is_checksum_header(name: &str) -> bool {
+    name.len() >= 15
+        && name[..15].eq_ignore_ascii_case("x-amz-checksum-")
+        && name[15..].bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// Operations modeled without auth (`smithy.api#noAuth` / `authtype: none`).

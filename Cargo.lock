@@ -38,10 +38,12 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "crc32fast",
  "hex",
  "hmac",
  "indexmap",
  "jmespath",
+ "libc",
  "md-5",
  "p256",
  "quick-xml",

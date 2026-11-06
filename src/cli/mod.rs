@@ -136,6 +136,8 @@ pub enum ArgKind {
     /// Every following word up to the next option.
     List,
     Single,
+    /// A bare word (argparse positional), e.g. `outfile`.
+    Positional,
 }
 
 /// Where a parsed argument goes.
@@ -146,6 +148,9 @@ pub enum ArgTarget {
     PageSize,
     MaxItems,
     CliInputJson,
+    /// `outfile` for operations with a streaming blob output
+    /// (`StreamingOutputArgument`).
+    Outfile,
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +235,13 @@ pub fn parse_op_args(
         let token = &tokens[i];
         i += 1;
         if !is_option(token) {
-            unknown.push(token.clone());
+            let free = table.iter().enumerate().position(|(idx, d)| {
+                d.kind == ArgKind::Positional && !out.iter().any(|(j, _)| *j == idx)
+            });
+            match free {
+                Some(idx) => out.push((idx, ArgValue::Words(vec![token.clone()]))),
+                None => unknown.push(token.clone()),
+            }
             continue;
         }
         let (flag, inline) = match token.split_once('=') {
@@ -257,7 +268,7 @@ pub fn parse_op_args(
         let def = &table[idx];
         let value = match def.kind {
             ArgKind::Boolean => ArgValue::Bool(!is_negated),
-            ArgKind::Single => {
+            ArgKind::Single | ArgKind::Positional => {
                 let v = match inline {
                     Some(v) => v,
                     None => {

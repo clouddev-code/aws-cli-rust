@@ -1,5 +1,7 @@
 //! Wire protocols: request serialization and response parsing.
 
+pub mod cbor;
+pub mod eventstream;
 pub mod parse;
 pub mod ser;
 pub mod xml;

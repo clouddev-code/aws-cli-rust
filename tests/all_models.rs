@@ -11,7 +11,14 @@ use awsr::value::{Map, Value};
 use chrono::{TimeZone, Utc};
 use std::collections::HashSet;
 
-const SUPPORTED: &[&str] = &["query", "ec2", "json", "rest-json", "rest-xml"];
+const SUPPORTED: &[&str] = &[
+    "query",
+    "ec2",
+    "json",
+    "rest-json",
+    "rest-xml",
+    "smithy-rpc-v2-cbor",
+];
 
 fn dummy(shape: &Shape, depth: usize) -> Value {
     match shape.type_name() {

@@ -1,6 +1,7 @@
-//! Response parsers (botocore `parsers.py`): query, ec2, json, rest-json
-//! and rest-xml, including error responses.
+//! Response parsers (botocore `parsers.py`): query, ec2, json, rest-json,
+//! rest-xml and smithy-rpc-v2-cbor, including error responses.
 
+use super::eventstream::{HeaderValue, Message};
 use super::xml::{self, Element};
 use crate::http::Response;
 use crate::model::{Operation, Shape};
@@ -74,6 +75,13 @@ pub fn parse(op: &Operation, resp: &Response) -> Result<Value> {
             };
             Ok(xml_shape(&shape, &XNode::One(&start), proto == "ec2"))
         }
+        "json" | "smithy-rpc-v2-cbor"
+            if shape
+                .as_ref()
+                .is_some_and(|s| s.event_stream_member().is_some()) =>
+        {
+            rpc_event_stream(&shape.unwrap(), &resp.body, proto)
+        }
         "json" => match shape {
             Some(shape) => Ok(json_shape(&shape, &body_json(&resp.body), false)),
             None => Ok(Value::Map(Map::new())),
@@ -82,8 +90,172 @@ pub fn parse(op: &Operation, resp: &Response) -> Result<Value> {
             Some(shape) => rest_modeled(&shape, resp, proto)?,
             None => Value::Map(Map::new()),
         }),
+        "smithy-rpc-v2-cbor" => match shape {
+            Some(shape) => Ok(json_shape(&shape, &body_cbor(&resp.body)?, false)),
+            None => Ok(Value::Map(Map::new())),
+        },
         other => Err(malformed(format!("unsupported protocol: {other}"))),
     }
+}
+
+// ------------------------------------------------------------- event streams
+
+/// Body of an event or exception message, before shape conversion
+/// (`_initial_body_parse` of the protocol's event stream parser).
+enum EventBody {
+    Xml(Element),
+    Json(J),
+}
+
+fn event_body(payload: &[u8], proto: &str) -> Result<EventBody> {
+    Ok(match proto {
+        "rest-xml" => EventBody::Xml(if payload.is_empty() {
+            Element::default()
+        } else {
+            xml::parse(payload).map_err(malformed)?
+        }),
+        "smithy-rpc-v2-cbor" => EventBody::Json(body_cbor(payload)?),
+        _ => EventBody::Json(body_json(payload)),
+    })
+}
+
+fn event_shape(shape: &Shape, body: &EventBody) -> Value {
+    match body {
+        EventBody::Xml(root) => xml_shape(shape, &XNode::One(root), false),
+        EventBody::Json(j) => json_shape(shape, j, false),
+    }
+}
+
+/// Decode an event stream body into a list of `{EventName: {...}}` maps
+/// (iterating botocore's `EventStream`). An error or exception message ends
+/// the stream with [`ParseError::Service`] (`EventStreamError`).
+fn events(stream: &Shape, body: &[u8], proto: &str) -> Result<Value> {
+    let messages = super::eventstream::decode(body).map_err(|e| malformed(e.0))?;
+    event_list(stream, &messages, proto).map(Value::List)
+}
+
+fn event_list(stream: &Shape, messages: &[Message], proto: &str) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for msg in messages {
+        if msg.is_error() {
+            return Err(ParseError::Service(Box::new(event_error(
+                stream, msg, proto,
+            )?)));
+        }
+        let Some(name) = msg.header_str(":event-type") else {
+            continue;
+        };
+        let Some(shape) = stream.member_named(name) else {
+            continue;
+        };
+        let mut event = Map::new();
+        event.insert(name.to_string(), event_value(&shape, msg, proto)?);
+        out.push(Value::Map(event));
+    }
+    Ok(out)
+}
+
+/// `BaseEventStreamParser._do_parse` for one event shape.
+fn event_value(shape: &Shape, msg: &Message, proto: &str) -> Result<Value> {
+    let mut out = Map::new();
+    for (name, m) in shape.members() {
+        if !m.bool_trait("eventheader") {
+            continue;
+        }
+        let v = match msg.header(name) {
+            Some(HeaderValue::Timestamp(ms)) => timestamp::from_epoch(*ms as f64 / 1000.0)
+                .map(Value::Timestamp)
+                .unwrap_or(Value::Int(*ms)),
+            Some(HeaderValue::Int(i)) if m.type_name() == "timestamp" => {
+                timestamp::from_epoch(*i as f64 / 1000.0)
+                    .map(Value::Timestamp)
+                    .unwrap_or(Value::Int(*i))
+            }
+            Some(HeaderValue::Int(i)) => Value::Int(*i),
+            Some(HeaderValue::Bool(b)) => Value::Bool(*b),
+            Some(HeaderValue::Str(s)) => Value::Str(s.clone()),
+            Some(HeaderValue::Bytes(b)) => Value::Bytes(b.clone()),
+            Some(HeaderValue::Uuid(u)) => Value::Bytes(u.to_vec()),
+            None => continue,
+        };
+        out.insert(name.to_string(), v);
+    }
+    if !shape.bool_trait("event") {
+        return Ok(Value::Map(out));
+    }
+    if let Some((name, m)) = shape
+        .members()
+        .into_iter()
+        .find(|(_, m)| m.bool_trait("eventpayload"))
+    {
+        let v = match m.type_name() {
+            "blob" => Value::Bytes(msg.payload.clone()),
+            "string" => Value::Str(String::from_utf8_lossy(&msg.payload).into_owned()),
+            _ => event_shape(&m, &event_body(&msg.payload, proto)?),
+        };
+        out.insert(name.to_string(), v);
+    } else if let Value::Map(body) = event_shape(shape, &event_body(&msg.payload, proto)?) {
+        out.extend(body);
+    }
+    Ok(Value::Map(out))
+}
+
+/// `BaseEventStreamParser._do_error_parse`.
+fn event_error(stream: &Shape, msg: &Message, proto: &str) -> Result<ServiceError> {
+    let mut err = ServiceError {
+        status: 400,
+        code: String::new(),
+        message: String::new(),
+        request_id: None,
+        fields: Map::new(),
+    };
+    let exception = msg
+        .header_str(":exception-type")
+        .and_then(|t| Some((t, stream.member_named(t)?)));
+    match exception {
+        Some((code, shape)) => {
+            err.code = code.to_string();
+            if let Value::Map(fields) = event_shape(&shape, &event_body(&msg.payload, proto)?) {
+                err.message = fields
+                    .get("Message")
+                    .or_else(|| fields.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                err.fields = fields;
+            }
+        }
+        None => {
+            err.code = msg.header_str(":error-code").unwrap_or("").to_string();
+            err.message = msg.header_str(":error-message").unwrap_or("").to_string();
+        }
+    }
+    Ok(err)
+}
+
+/// json / rpc-v2-cbor outputs with an event stream member: the first message
+/// is `initial-response` carrying the other output members.
+fn rpc_event_stream(shape: &Shape, body: &[u8], proto: &str) -> Result<Value> {
+    let messages = super::eventstream::decode(body).map_err(|e| malformed(e.0))?;
+    let Some(first) = messages
+        .first()
+        .filter(|m| m.header_str(":event-type") == Some("initial-response"))
+    else {
+        return Err(malformed("First event was not of type initial-response"));
+    };
+    let mut out = match event_shape(shape, &event_body(&first.payload, proto)?) {
+        Value::Map(m) => m,
+        _ => Map::new(),
+    };
+    let member = shape.event_stream_member().expect("checked by caller");
+    let stream = shape
+        .member_named(member)
+        .ok_or_else(|| malformed("event stream member missing"))?;
+    out.insert(
+        member.to_string(),
+        Value::List(event_list(&stream, &messages[1..], proto)?),
+    );
+    Ok(Value::Map(out))
 }
 
 // ------------------------------------------------------------------- errors
@@ -119,8 +291,12 @@ fn parse_error(op: &Operation, resp: &Response) -> Result<ServiceError> {
             err.request_id = parsed.get(rid).and_then(Value::as_str).map(str::to_string);
             fill_code_message(&mut err, parsed.get("Error"));
         }
-        "json" | "rest-json" => {
-            let body = body_json(&resp.body);
+        "json" | "rest-json" | "smithy-rpc-v2-cbor" => {
+            let body = if proto == "smithy-rpc-v2-cbor" {
+                body_cbor(&resp.body)?
+            } else {
+                body_json(&resp.body)
+            };
             err.message = body
                 .get("message")
                 .or_else(|| body.get("Message"))
@@ -221,6 +397,7 @@ fn modeled_error(shape: &Shape, resp: &Response, proto: &str) -> Result<Value> {
             xml_shape(shape, &XNode::One(&root), proto == "ec2")
         }
         "json" => json_shape(shape, &body_json(&resp.body), false),
+        "smithy-rpc-v2-cbor" => json_shape(shape, &body_cbor(&resp.body)?, false),
         _ => rest_modeled(shape, resp, proto)?,
     })
 }
@@ -301,7 +478,8 @@ fn rest_modeled(shape: &Shape, resp: &Response, proto: &str) -> Result<Value> {
             .member_named(payload)
             .ok_or_else(|| malformed("payload member missing"))?;
         if body_shape.bool_trait("eventstream") {
-            return Err(malformed("event streams are not supported yet"));
+            out.insert(payload.into(), events(&body_shape, &resp.body, proto)?);
+            return Ok(Value::Map(out));
         }
         match body_shape.type_name() {
             "string" => {
@@ -416,6 +594,14 @@ fn body_json(body: &[u8]) -> J {
     match serde_json::from_slice(body) {
         Ok(j) => j,
         Err(_) => serde_json::json!({ "message": String::from_utf8_lossy(body) }),
+    }
+}
+
+/// CBOR body as JSON (see [`super::cbor`]); empty decodes to `{}`.
+fn body_cbor(body: &[u8]) -> Result<J> {
+    match super::cbor::decode(body).map_err(|e| malformed(e.0))? {
+        J::Null => Ok(J::Object(Default::default())),
+        j => Ok(j),
     }
 }
 

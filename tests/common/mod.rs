@@ -117,3 +117,72 @@ pub fn protocol_cases(kind: &str, file: &str) -> Vec<ProtocolCase> {
     }
     out
 }
+
+fn percent_decode(s: &str) -> String {
+    let s = s.replace('+', " ");
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// Parse a raw `.req` file the way botocore's test does (BaseHTTPRequestHandler
+/// + parse_qsl, which drops blank values).
+pub fn parse_raw(raw: &str) -> awsr::http::Request {
+    let (head, body) = match raw.split_once("\n\n") {
+        Some((h, b)) => (h, b),
+        None => (raw, ""),
+    };
+    let mut lines = head.lines();
+    let request_line = lines.next().unwrap();
+    let mut parts = request_line.splitn(2, ' ');
+    let method = parts.next().unwrap().to_string();
+    let target = parts.next().unwrap().rsplit_once(' ').unwrap().0;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let query = query
+        .split('&')
+        .filter_map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            (!v.is_empty()).then(|| (percent_decode(k), percent_decode(v)))
+        })
+        .collect();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            let last = headers.last_mut().unwrap();
+            last.1.push(' ');
+            last.1.push_str(line.trim());
+        } else {
+            let (k, v) = line.split_once(':').unwrap();
+            headers.push((k.to_string(), v.trim_start().to_string()));
+        }
+    }
+    let host = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .unwrap()
+        .1
+        .clone();
+    awsr::http::Request {
+        method,
+        scheme: "https".into(),
+        host,
+        path: path.to_string(),
+        query,
+        headers,
+        body: body.as_bytes().to_vec(),
+        timeout: None,
+    }
+}

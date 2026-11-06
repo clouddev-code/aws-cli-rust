@@ -1,5 +1,5 @@
 //! Request serializers (botocore `serialize.py`): query, ec2, json,
-//! rest-json and rest-xml.
+//! rest-json, rest-xml and smithy-rpc-v2-cbor.
 
 use super::{ProtocolError, Serialized};
 use crate::http::encode_label;
@@ -27,6 +27,7 @@ pub fn serialize(op: &Operation, params: &Value) -> Result<Serialized> {
         "json" => json_request(op, params)?,
         "rest-json" => rest_request(op, params, RestKind::Json)?,
         "rest-xml" => rest_request(op, params, RestKind::Xml)?,
+        "smithy-rpc-v2-cbor" => cbor_request(op, params)?,
         other => return Err(ProtocolError(format!("unsupported protocol: {other}"))),
     };
     out.host_prefix = expand_host_prefix(op, params)?;
@@ -319,6 +320,42 @@ fn json_value(v: &Value, shape: &Shape) -> Result<J> {
             other => other.to_json(crate::value::TimestampStyle::Epoch),
         },
         _ => v.to_json(crate::value::TimestampStyle::Epoch),
+    })
+}
+
+// ---------------------------------------------------------- rpc-v2-cbor
+
+fn cbor_request(op: &Operation, params: &Value) -> Result<Serialized> {
+    let mut body = Vec::new();
+    if let Some(shape) = op.input() {
+        super::cbor::encode(params, &shape, &mut body)?;
+    }
+    let media = if op
+        .output()
+        .is_some_and(|o| o.event_stream_member().is_some())
+    {
+        "application/vnd.amazon.eventstream"
+    } else {
+        "application/cbor"
+    };
+    let mut headers = vec![("smithy-protocol".to_string(), "rpc-v2-cbor".to_string())];
+    if op.model.is_query_compatible() {
+        headers.push(("x-amzn-query-mode".into(), "true".into()));
+    }
+    headers.push(("Accept".into(), media.into()));
+    if !body.is_empty() {
+        headers.push(("Content-Type".into(), media.into()));
+    }
+    Ok(Serialized {
+        method: op.http_method().into(),
+        path: format!(
+            "/service/{}/operation/{}",
+            op.model.meta_str("targetPrefix").unwrap_or(""),
+            op.wire_name()
+        ),
+        headers,
+        body,
+        ..Default::default()
     })
 }
 

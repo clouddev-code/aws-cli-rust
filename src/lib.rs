@@ -1,5 +1,6 @@
 //! awsr: an experimental Rust port of the data-driven core of the AWS CLI.
 
+pub mod checksum;
 pub mod cli;
 pub mod client;
 pub mod commands;

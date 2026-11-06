@@ -1,13 +1,17 @@
-//! AWS Signature Version 4 (botocore `auth.SigV4Auth` / `S3SigV4Auth`).
+//! AWS Signature Version 4 (botocore `auth.SigV4Auth` / `S3SigV4Auth`) and
+//! the asymmetric SigV4a (`crt.auth.CrtSigV4AsymAuth`, implemented by
+//! aws-c-auth in botocore).
 
 use crate::http::Request;
 use crate::util::{normalize_url_path, quote};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use p256::elliptic_curve::PrimeField;
 use sha2::{Digest, Sha256};
 
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
+pub const STREAMING_UNSIGNED_PAYLOAD_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
 
 const SIGNED_HEADERS_BLACKLIST: &[&str] = &[
     "connection",
@@ -53,6 +57,12 @@ pub struct Signer<'a> {
     pub service: &'a str,
     /// S3 flavour: no path normalization and an `X-Amz-Content-SHA256` header.
     pub s3: bool,
+    /// Payload hash to sign instead of the body's SHA-256 (`UNSIGNED-PAYLOAD`,
+    /// `STREAMING-UNSIGNED-PAYLOAD-TRAILER`).
+    pub payload: Option<&'a str>,
+    /// SigV4a: `region` is the region set (`X-Amz-Region-Set`), the scope has
+    /// no region and the signature is ECDSA P-256.
+    pub asymmetric: bool,
 }
 
 /// Intermediate values, exposed for tests and `--debug`.
@@ -77,35 +87,58 @@ impl Signer<'_> {
         } else {
             req.set_header("X-Amz-Date", timestamp.clone());
         }
+        if self.asymmetric {
+            req.set_header("X-Amz-Region-Set", self.region);
+        }
         if let Some(token) = &self.credentials.session_token {
             req.set_header("X-Amz-Security-Token", token.clone());
         }
         if self.s3 {
-            let payload = payload_hash(&req.body);
+            let payload = match self.payload {
+                Some(p) => p.to_string(),
+                None => payload_hash(&req.body),
+            };
             req.set_header("X-Amz-Content-SHA256", payload);
         }
 
         let canonical_request = self.canonical_request(req);
-        let scope = format!(
-            "{}/{}/{}/aws4_request",
-            &timestamp[..8],
-            self.region,
-            self.service
-        );
+        let (algorithm, scope) = if self.asymmetric {
+            (
+                ALGORITHM_V4A,
+                format!("{}/{}/aws4_request", &timestamp[..8], self.service),
+            )
+        } else {
+            (
+                "AWS4-HMAC-SHA256",
+                format!(
+                    "{}/{}/{}/aws4_request",
+                    &timestamp[..8],
+                    self.region,
+                    self.service
+                ),
+            )
+        };
         let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{}",
+            "{algorithm}\n{timestamp}\n{scope}\n{}",
             hex::encode(Sha256::digest(canonical_request.as_bytes()))
         );
-        let k_date = hmac(
-            format!("AWS4{}", self.credentials.secret_key).as_bytes(),
-            &timestamp[..8],
-        );
-        let k_region = hmac(&k_date, self.region);
-        let k_service = hmac(&k_region, self.service);
-        let k_signing = hmac(&k_service, "aws4_request");
-        let signature = hex::encode(hmac(&k_signing, &string_to_sign));
+        let signature = if self.asymmetric {
+            use p256::ecdsa::signature::Signer as _;
+            let key = v4a_signing_key(self.credentials);
+            let sig: p256::ecdsa::Signature = key.sign(string_to_sign.as_bytes());
+            hex::encode(sig.to_der().as_bytes())
+        } else {
+            let k_date = hmac(
+                format!("AWS4{}", self.credentials.secret_key).as_bytes(),
+                &timestamp[..8],
+            );
+            let k_region = hmac(&k_date, self.region);
+            let k_service = hmac(&k_region, self.service);
+            let k_signing = hmac(&k_service, "aws4_request");
+            hex::encode(hmac(&k_signing, &string_to_sign))
+        };
         let authorization = format!(
-            "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={}, Signature={signature}",
+            "{algorithm} Credential={}/{scope}, SignedHeaders={}, Signature={signature}",
             self.credentials.access_key,
             signed_headers(&headers_to_sign(req))
         );
@@ -124,9 +157,10 @@ impl Signer<'_> {
             quote(&normalize_url_path(&req.path), "/~")
         };
         let headers = headers_to_sign(req);
-        let body_hash = match req.header("X-Amz-Content-SHA256") {
-            Some(v) => v.to_string(),
-            None => payload_hash(&req.body),
+        let body_hash = match (req.header("X-Amz-Content-SHA256"), self.payload) {
+            (Some(v), _) => v.to_string(),
+            (None, Some(p)) => p.to_string(),
+            (None, None) => payload_hash(&req.body),
         };
         format!(
             "{}\n{}\n{}\n{}\n\n{}\n{}",
@@ -138,6 +172,56 @@ impl Signer<'_> {
             body_hash
         )
     }
+}
+
+const ALGORITHM_V4A: &str = "AWS4-ECDSA-P256-SHA256";
+
+/// P-256 group order minus two, big-endian.
+const P256_N_MINUS_2: [u8; 32] =
+    hex_literal(b"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254f");
+
+const fn hex_literal(s: &[u8; 64]) -> [u8; 32] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            _ => c - b'a' + 10,
+        }
+    }
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = nibble(s[2 * i]) << 4 | nibble(s[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// Derive the SigV4a ECDSA key from the secret key
+/// (`aws_ecc_key_pair_new_ecdsa_p256_key_from_aws_credentials`): HMAC-SHA256
+/// in NIST SP 800-108 counter mode, retried with an external counter until
+/// the candidate is at most n-2, then d = candidate + 1.
+pub fn v4a_signing_key(creds: &Credentials) -> p256::ecdsa::SigningKey {
+    let key = format!("AWS4A{}", creds.secret_key);
+    for counter in 1u8..=254 {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(&1u32.to_be_bytes());
+        mac.update(ALGORITHM_V4A.as_bytes());
+        mac.update(&[0]);
+        mac.update(creds.access_key.as_bytes());
+        mac.update(&[counter]);
+        mac.update(&256u32.to_be_bytes());
+        let candidate: [u8; 32] = mac.finalize().into_bytes().into();
+        if candidate > P256_N_MINUS_2 {
+            continue;
+        }
+        let k = Option::<p256::Scalar>::from(p256::Scalar::from_repr(candidate.into()))
+            .expect("candidate is below the group order");
+        let d = p256::NonZeroScalar::new(k + p256::Scalar::ONE).expect("candidate + 1 is non-zero");
+        return p256::ecdsa::SigningKey::from(d);
+    }
+    // Each attempt fails with probability ~2^-32.
+    unreachable!("SigV4a key derivation exhausted its counter")
 }
 
 fn hmac(key: &[u8], msg: &str) -> Vec<u8> {

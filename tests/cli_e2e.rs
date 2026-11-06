@@ -4,6 +4,7 @@
 
 mod common;
 
+use awsr::checksum::Algorithm;
 use awsr::config::{SharedConfig, parse_ini};
 use awsr::driver::{self, Context};
 use awsr::http::{Request, Response, Transport, TransportError};
@@ -277,7 +278,7 @@ fn s3_rest_xml_virtual_host_and_s3_signing() {
 }
 
 #[test]
-fn s3_checksum_required_operation_gets_content_md5() {
+fn s3_checksum_required_operation_gets_crc64nvme() {
     let Some(r) = run(
         &[
             "s3api",
@@ -300,14 +301,187 @@ fn s3_checksum_required_operation_gets_content_md5() {
         b.contains("<Tag><Key>env</Key><Value>dev</Value></Tag>"),
         "{b}"
     );
-    assert!(
-        req.header("Content-MD5").is_some()
-            || req
-                .headers
-                .iter()
-                .any(|(k, _)| k.starts_with("x-amz-checksum"))
+    assert_eq!(
+        req.header("x-amz-checksum-crc64nvme"),
+        Some(Algorithm::Crc64Nvme.b64digest(&req.body).as_str())
     );
+    assert_eq!(
+        req.header("x-amz-sdk-checksum-algorithm"),
+        Some("CRC64NVME")
+    );
+    assert!(req.header("Content-MD5").is_none());
     assert_eq!(r.stdout, "");
+}
+
+fn temp_file(name: &str, data: &[u8]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("awsr-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+#[test]
+fn s3_put_object_sends_aws_chunked_trailer_checksum() {
+    let file = temp_file("put.txt", b"hello world");
+    let Some(r) = run(
+        &[
+            "s3api",
+            "put-object",
+            "--bucket",
+            "b1",
+            "--key",
+            "k",
+            "--body",
+            file.to_str().unwrap(),
+        ],
+        vec![ok("")],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let req = &r.requests[0];
+    assert_eq!(req.header("Content-Encoding"), Some("aws-chunked"));
+    assert_eq!(
+        req.header("X-Amz-Trailer"),
+        Some("x-amz-checksum-crc64nvme")
+    );
+    assert_eq!(req.header("X-Amz-Decoded-Content-Length"), Some("11"));
+    assert_eq!(
+        req.header("x-amz-sdk-checksum-algorithm"),
+        Some("CRC64NVME")
+    );
+    assert_eq!(
+        req.header("X-Amz-Content-SHA256"),
+        Some("STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+    );
+    assert_eq!(
+        body(req),
+        "b\r\nhello world\r\n0\r\nx-amz-checksum-crc64nvme:jSnVw/bqjr4=\r\n\r\n"
+    );
+
+    // An explicit algorithm wins; `when_required` turns the default off.
+    let Some(r) = run(
+        &[
+            "s3api",
+            "put-object",
+            "--bucket",
+            "b1",
+            "--key",
+            "k",
+            "--body",
+            file.to_str().unwrap(),
+            "--checksum-algorithm",
+            "SHA256",
+        ],
+        vec![ok("")],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(
+        r.requests[0].header("X-Amz-Trailer"),
+        Some("x-amz-checksum-sha256")
+    );
+    let mut env = default_env();
+    env.insert(
+        "AWS_REQUEST_CHECKSUM_CALCULATION".into(),
+        "WHEN_REQUIRED".into(),
+    );
+    let Some(r) = run_with(
+        &[
+            "s3api",
+            "put-object",
+            "--bucket",
+            "b1",
+            "--key",
+            "k",
+            "--body",
+            file.to_str().unwrap(),
+        ],
+        vec![ok("")],
+        env,
+        SharedConfig::default(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let req = &r.requests[0];
+    assert!(req.header("Content-Encoding").is_none());
+    assert_eq!(body(req), "hello world");
+    assert_eq!(
+        req.header("X-Amz-Content-SHA256"),
+        Some(awsr::sigv4::payload_hash(b"hello world").as_str())
+    );
+
+    let mut env = default_env();
+    env.insert(
+        "AWS_REQUEST_CHECKSUM_CALCULATION".into(),
+        "sometimes".into(),
+    );
+    let Some(r) = run_with(
+        &["s3api", "list-buckets"],
+        vec![],
+        env,
+        SharedConfig::default(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr
+            .contains("Unsupported configuration value for request_checksum_calculation"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn s3_get_object_outfile_and_response_checksum_validation() {
+    let out = temp_file("get.txt", b"");
+    let resp = |checksum: &str| Response {
+        status: 200,
+        headers: vec![
+            ("Content-Length".into(), "11".into()),
+            ("x-amz-checksum-crc32".into(), checksum.into()),
+        ],
+        body: b"hello world".to_vec(),
+    };
+    let args = [
+        "s3api",
+        "get-object",
+        "--bucket",
+        "b1",
+        "--key",
+        "k",
+        out.to_str().unwrap(),
+    ];
+    let Some(r) = run(&args, vec![resp("DUoRhQ==")]) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.requests[0].header("x-amz-checksum-mode"), Some("ENABLED"));
+    assert_eq!(std::fs::read(&out).unwrap(), b"hello world");
+    let printed: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(printed["ContentLength"], 11);
+    assert!(printed.get("Body").is_none());
+
+    let Some(r) = run(&args, vec![resp("AAAAAA==")]) else {
+        return;
+    };
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr
+            .contains("Expected checksum AAAAAA== did not match calculated checksum: DUoRhQ=="),
+        "{}",
+        r.stderr
+    );
+
+    let Some(r) = run(&args[..6], vec![]) else {
+        return;
+    };
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains("outfile"), "{}", r.stderr);
 }
 
 #[test]
@@ -689,4 +863,191 @@ fn s3_object_key_path_and_path_style_endpoint() {
     let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
     assert_eq!(out["ContentLength"], 5);
     assert_eq!(out["ETag"], "\"abc\"");
+}
+
+#[test]
+fn eventbridge_global_endpoint_uses_sigv4a() {
+    let args = [
+        "events",
+        "put-events",
+        "--endpoint-id",
+        "abc.xyz",
+        "--entries",
+        "Source=app,DetailType=t,Detail={}",
+    ];
+    let reply = || ok(r#"{"FailedEntryCount":0,"Entries":[{"EventId":"e1"}]}"#);
+    let Some(r) = run(&args, vec![reply()]) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let req = &r.requests[0];
+    assert_eq!(req.host, "abc.xyz.endpoint.events.amazonaws.com");
+    assert_eq!(req.header("X-Amz-Region-Set"), Some("*"));
+    let auth = req.header("Authorization").unwrap();
+    assert!(
+        auth.starts_with(
+            "AWS4-ECDSA-P256-SHA256 Credential=AKIDEXAMPLE/20150830/events/aws4_request, SignedHeaders="
+        ),
+        "{auth}"
+    );
+    assert!(auth.contains("x-amz-region-set"), "{auth}");
+
+    let mut env = default_env();
+    env.insert(
+        "AWS_SIGV4A_SIGNING_REGION_SET".into(),
+        "us-east-1,us-west-2".into(),
+    );
+    let Some(r) = run_with(&args, vec![reply()], env, SharedConfig::default()) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(
+        r.requests[0].header("X-Amz-Region-Set"),
+        Some("us-east-1,us-west-2")
+    );
+}
+
+fn event(event_type: &str, payload: &[u8]) -> Vec<u8> {
+    use awsr::protocol::eventstream::{HeaderValue, encode};
+    encode(
+        &[
+            (":message-type", HeaderValue::Str("event".into())),
+            (":event-type", HeaderValue::Str(event_type.into())),
+        ],
+        payload,
+    )
+}
+
+#[test]
+fn s3_select_object_content_writes_records_to_outfile() {
+    let out = temp_file("select.csv", b"");
+    let mut body = event("Records", b"a,1\n");
+    body.extend(event("Records", b"b,2\n"));
+    body.extend(event(
+        "Stats",
+        b"<Stats><Details><BytesScanned>10</BytesScanned><BytesProcessed>10</BytesProcessed><BytesReturned>8</BytesReturned></Details></Stats>",
+    ));
+    body.extend(event("End", b""));
+    let args = [
+        "s3api",
+        "select-object-content",
+        "--bucket",
+        "b1",
+        "--key",
+        "data.csv",
+        "--expression",
+        "SELECT * FROM S3Object",
+        "--expression-type",
+        "SQL",
+        "--input-serialization",
+        "CSV={},CompressionType=NONE",
+        "--output-serialization",
+        "CSV={}",
+        out.to_str().unwrap(),
+    ];
+    let Some(r) = run(
+        &args,
+        vec![Response {
+            status: 200,
+            headers: vec![],
+            body,
+        }],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.requests[0].method, "POST");
+    assert!(r.requests[0].query.iter().any(|(k, _)| k == "select"));
+    assert_eq!(std::fs::read(&out).unwrap(), b"a,1\nb,2\n");
+    assert_eq!(r.stdout, "");
+
+    // An error message in the stream fails the command.
+    use awsr::protocol::eventstream::{HeaderValue, encode};
+    let mut body = event("Records", b"a,1\n");
+    body.extend(encode(
+        &[
+            (":message-type", HeaderValue::Str("error".into())),
+            (":error-code", HeaderValue::Str("InternalError".into())),
+            (":error-message", HeaderValue::Str("boom".into())),
+        ],
+        b"",
+    ));
+    let Some(r) = run(
+        &args,
+        vec![Response {
+            status: 200,
+            headers: vec![],
+            body,
+        }],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 254);
+    assert!(
+        r.stderr.contains(
+            "An error occurred (InternalError) when calling the SelectObjectContent operation: boom"
+        ),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn event_streams_in_rest_json_and_json_rpc_outputs() {
+    // rest-json: the stream is the HTTP payload, other members are headers.
+    let mut body = event("PayloadChunk", b"hello ");
+    body.extend(event("PayloadChunk", b"world"));
+    body.extend(event("InvokeComplete", br#"{"LogResult":"bG9n"}"#));
+    let Some(r) = run(
+        &[
+            "lambda",
+            "invoke-with-response-stream",
+            "--function-name",
+            "f",
+        ],
+        vec![Response {
+            status: 200,
+            headers: vec![("X-Amz-Executed-Version".into(), "$LATEST".into())],
+            body,
+        }],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(out["ExecutedVersion"], "$LATEST");
+    assert_eq!(out["EventStream"][0]["PayloadChunk"]["Payload"], "aGVsbG8g");
+    assert_eq!(out["EventStream"][2]["InvokeComplete"]["LogResult"], "bG9n");
+
+    // json RPC: the first message is the initial response.
+    let mut body = event("initial-response", b"{}");
+    body.extend(event(
+        "SubscribeToShardEvent",
+        br#"{"Records":[],"ContinuationSequenceNumber":"1","MillisBehindLatest":0}"#,
+    ));
+    let Some(r) = run(
+        &[
+            "kinesis",
+            "subscribe-to-shard",
+            "--consumer-arn",
+            "arn:aws:kinesis:us-east-1:123456789012:stream/s/consumer/c:1",
+            "--shard-id",
+            "shardId-000000000000",
+            "--starting-position",
+            "Type=LATEST",
+        ],
+        vec![Response {
+            status: 200,
+            headers: vec![],
+            body,
+        }],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        out["EventStream"][0]["SubscribeToShardEvent"]["ContinuationSequenceNumber"],
+        "1"
+    );
 }

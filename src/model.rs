@@ -232,6 +232,23 @@ impl<'a> Operation<'a> {
             .and_then(|r| self.model.resolve_ref(r).ok())
     }
 
+    /// The input payload is a blob (`OperationModel.has_streaming_input`).
+    pub fn has_streaming_input(&self) -> bool {
+        self.input().is_some_and(|s| {
+            s.payload()
+                .and_then(|p| s.member_named(p))
+                .is_some_and(|m| m.type_name() == "blob")
+        })
+    }
+
+    /// Output payload member that is a blob (`get_streaming_output`), the
+    /// target of the CLI `outfile` argument.
+    pub fn streaming_output_member(&self) -> Option<&'a str> {
+        let s = self.output()?;
+        let p = s.payload()?;
+        (s.member_named(p)?.type_name() == "blob").then_some(p)
+    }
+
     pub fn host_prefix(&self) -> Option<&'a str> {
         self.def
             .get("endpoint")

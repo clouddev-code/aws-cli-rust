@@ -2,15 +2,15 @@
 //! parameters, resolve region/credentials/endpoint, sign, send, format.
 
 use crate::cli::params::{self, BinaryFormat, ParamContext};
-use crate::cli::{self, ArgTarget, ArgValue, Globals, UsageError};
-use crate::client::{self, Client, ClientConfig, ClientError};
+use crate::cli::{self, ArgDef, ArgKind, ArgTarget, ArgValue, Globals, UsageError};
+use crate::client::{self, ChecksumWhen, Client, ClientConfig, ClientError};
 use crate::credentials::Resolver;
 use crate::loader::Loader;
 use crate::model::{Operation, ServiceModel};
 use crate::naming::cli_name;
 use crate::output::{self, OutputFormat};
 use crate::paginate::{self, PaginationArgs, PaginatorConfig};
-use crate::value::Value;
+use crate::value::{TimestampStyle, Value};
 use serde_json::Value as J;
 use std::io::Write;
 
@@ -155,7 +155,21 @@ fn run_inner(
         .flatten()
         .and_then(|doc| PaginatorConfig::for_operation(&doc, op_name));
     let input = op.input();
-    let table = cli::arg_table(input.as_ref(), paginator.is_some(), globals.no_paginate);
+    let mut table = cli::arg_table(input.as_ref(), paginator.is_some(), globals.no_paginate);
+    let streaming_output = op.streaming_output_member();
+    // `S3SelectStreamOutputArgument`: the Records payloads of the event
+    // stream go to the outfile.
+    let select_output = (model.service_name == "s3" && op.name == "SelectObjectContent")
+        .then(|| op.output().and_then(|o| o.payload().map(str::to_string)))
+        .flatten();
+    if streaming_output.is_some() || select_output.is_some() {
+        table.push(ArgDef {
+            cli_name: "outfile".into(),
+            target: ArgTarget::Outfile,
+            kind: ArgKind::Positional,
+            required: true,
+        });
+    }
 
     let op_tokens: Vec<String> = rest.iter().skip(2).cloned().collect();
     if op_tokens.first().map(String::as_str) == Some("help") {
@@ -201,6 +215,7 @@ fn run_inner(
     let mut by_member: std::collections::HashMap<String, Value> = Default::default();
     let mut pagination = PaginationArgs::default();
     let mut cli_input: Option<String> = None;
+    let mut outfile: Option<String> = None;
     for (idx, value) in &parsed {
         let def = &table[*idx];
         let pctx = ParamContext {
@@ -235,6 +250,7 @@ fn run_inner(
                     ArgTarget::PageSize => pagination.page_size = Some(num(&w)?),
                     ArgTarget::MaxItems => pagination.max_items = Some(num(&w)?.max(0) as usize),
                     ArgTarget::CliInputJson => cli_input = Some(w),
+                    ArgTarget::Outfile => outfile = Some(w),
                     ArgTarget::Member(_) => unreachable!(),
                 }
             }
@@ -281,9 +297,30 @@ fn run_inner(
 
     let client = build_client(ctx, &globals, &model, &op)?;
     let call = |p: &Value, err: &mut dyn Write| {
-        client
-            .call_json(op_name, p, err)
-            .map_err(|e| client_failure(e, &op.name))
+        let mut v = client
+            .call(op_name, p, None, err)
+            .map_err(|e| client_failure(e, &op.name))?;
+        // `StreamingOutputArgument.save_file`: the payload goes to the file
+        // and is left out of the printed response.
+        if let (Some(member), Some(path), Value::Map(m)) = (streaming_output, &outfile, &mut v)
+            && let Some(Value::Bytes(bytes)) = m.shift_remove(member)
+        {
+            std::fs::write(path, bytes)
+                .map_err(|e| Failure::general(format!("[Errno] {e}: '{path}'")))?;
+        }
+        if let (Some(member), Some(path), Value::Map(m)) = (&select_output, &outfile, &mut v)
+            && let Some(Value::List(events)) = m.shift_remove(member.as_str())
+        {
+            let mut data = Vec::new();
+            for event in &events {
+                if let Some(Value::Bytes(b)) = event.get("Records").and_then(|r| r.get("Payload")) {
+                    data.extend(b);
+                }
+            }
+            std::fs::write(path, data)
+                .map_err(|e| Failure::general(format!("[Errno] {e}: '{path}'")))?;
+        }
+        Ok::<_, Failure>(v.to_json(TimestampStyle::Iso8601))
     };
     let format = match globals
         .output
@@ -428,12 +465,32 @@ fn build_client<'a>(
             .or_else(|| ctx.config.get(&profile, key))
             .is_some_and(|v| v.eq_ignore_ascii_case("true"))
     };
+    let checksum_when = |env: &str, key: &str| {
+        ctx.env_var(env)
+            .or_else(|| ctx.config.get(&profile, key))
+            .map_or(Ok(ChecksumWhen::default()), |v| {
+                ChecksumWhen::parse(key, &v)
+            })
+            .map_err(Failure::general)
+    };
     let config = ClientConfig {
         region,
         endpoint_url: globals.endpoint_url.clone(),
         use_fips: flag("AWS_USE_FIPS_ENDPOINT", "use_fips_endpoint"),
         use_dualstack: flag("AWS_USE_DUALSTACK_ENDPOINT", "use_dualstack_endpoint"),
         debug: globals.debug,
+        request_checksum_calculation: checksum_when(
+            "AWS_REQUEST_CHECKSUM_CALCULATION",
+            "request_checksum_calculation",
+        )?,
+        response_checksum_validation: checksum_when(
+            "AWS_RESPONSE_CHECKSUM_VALIDATION",
+            "response_checksum_validation",
+        )?,
+        sigv4a_signing_region_set: ctx
+            .env_var("AWS_SIGV4A_SIGNING_REGION_SET")
+            .or_else(|| ctx.config.get(&profile, "sigv4a_signing_region_set"))
+            .filter(|v| !v.is_empty()),
     };
     Client::new(ctx, model, config, credentials).map_err(Failure::general)
 }

@@ -2,8 +2,10 @@
 
 mod common;
 
-use awsr::protocol::{ser, xml};
+use awsr::protocol::{cbor, ser, xml};
 use awsr::value::Value;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::Value as J;
 
 /// `ET.canonicalize(..., strip_text=True)` equivalent: compare trees with
@@ -41,7 +43,29 @@ fn check(c: &common::ProtocolCase) -> Result<(), String> {
     let expected = &c.case["serialized"];
     let proto = c.model.protocol();
 
-    if let Some(body) = expected.get("body").and_then(J::as_str) {
+    if let Some(body) = expected.get("body").and_then(J::as_str)
+        && proto == "smithy-rpc-v2-cbor"
+    {
+        // CBOR allows several encodings of one value (definite vs indefinite
+        // lengths), so compare decoded data.
+        let want = B64.decode(body).map_err(|e| e.to_string())?;
+        // Tag-1 timestamps may be integers or floats.
+        fn numeric(v: J) -> J {
+            match v {
+                J::Number(n) => n.as_f64().map_or(J::Number(n), J::from),
+                J::Array(a) => J::Array(a.into_iter().map(numeric).collect()),
+                J::Object(o) => J::Object(o.into_iter().map(|(k, v)| (k, numeric(v))).collect()),
+                other => other,
+            }
+        }
+        let (a, b) = (
+            cbor::decode(&req.body).map(numeric),
+            cbor::decode(&want).map(numeric),
+        );
+        if a.as_ref().ok() != b.as_ref().ok() || a.is_err() {
+            return Err(format!("body\n  actual:   {a:?}\n  expected: {b:?}"));
+        }
+    } else if let Some(body) = expected.get("body").and_then(J::as_str) {
         let actual = String::from_utf8_lossy(&req.body).to_string();
         let equal = match proto {
             "json" | "rest-json" => match (
@@ -204,4 +228,19 @@ fn rest_json() {
 #[test]
 fn rest_xml() {
     run("rest-xml");
+}
+
+#[test]
+fn smithy_rpc_v2_cbor() {
+    run("smithy-rpc-v2-cbor");
+}
+
+#[test]
+fn smithy_rpc_v2_cbor_query_compatible() {
+    run("smithy-rpc-v2-cbor-query-compatible");
+}
+
+#[test]
+fn smithy_rpc_v2_cbor_non_query_compatible() {
+    run("smithy-rpc-v2-cbor-non-query-compatible");
 }

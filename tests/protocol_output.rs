@@ -6,6 +6,8 @@ use awsr::http::Response;
 use awsr::protocol::parse::{self, ParseError};
 use awsr::timestamp;
 use awsr::value::Value;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Map, Value as J};
 
 /// Shape the parsed value the way botocore's test fix-ups do: blobs as UTF-8
@@ -51,6 +53,7 @@ fn check(c: &common::ProtocolCase) -> Result<(), String> {
     let r = &c.case["response"];
     let proto = c.model.protocol();
     let body = match r.get("body").and_then(J::as_str) {
+        Some(b) if proto == "smithy-rpc-v2-cbor" => B64.decode(b).map_err(|e| e.to_string())?,
         Some(b) => b.as_bytes().to_vec(),
         None if proto == "query" => b"<xml/>".to_vec(),
         None => Vec::new(),
@@ -150,4 +153,14 @@ fn rest_json() {
 #[test]
 fn rest_xml() {
     run("rest-xml");
+}
+
+#[test]
+fn smithy_rpc_v2_cbor() {
+    run("smithy-rpc-v2-cbor");
+}
+
+#[test]
+fn smithy_rpc_v2_cbor_query_compatible() {
+    run("smithy-rpc-v2-cbor-query-compatible");
 }
