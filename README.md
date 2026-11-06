@@ -7,10 +7,16 @@ botocore のサービスモデル (`service-2.json` ほか) をそのまま読�
 ## 必要なもの
 
 - Rust 1.92 以降 (edition 2024)
-- botocore のデータディレクトリ。以下の順に探します。
-  1. 環境変数 `AWSR_DATA_DIR`
-  2. 実行ファイルと同じ場所の `data/`
-  3. `reference/aws-cli/awscli/botocore/data` (開発用チェックアウト)
+- ビルド時に botocore のデータ (`reference/aws-cli/awscli/botocore/data`、または `AWSR_EMBED_DATA_DIR`) と awscli の examples。ビルドスクリプトが事前変換と zstd 圧縮をしてバイナリに埋め込むので、できたバイナリ (約 21 MB) は単体で動きます。
+
+実行時は以下の順にモデルを探します。
+
+1. 環境変数 `AWSR_DATA_DIR` (botocore の `data` ディレクトリ)
+2. 埋め込みモデル
+3. 実行ファイルと同じ場所の `data/`
+4. `reference/aws-cli/awscli/botocore/data` (開発用チェックアウト)
+
+`cargo build --no-default-features` で埋め込みなしのバイナリになります (3 と 4 を使う)。
 
 開発用チェックアウトの取得 (fish):
 
@@ -51,9 +57,24 @@ set -x AWS_PROFILE dev
 ./target/release/awsr lambda list-functions --endpoint-url http://localhost:4566 --region us-east-1
 ./target/release/awsr login --profile console   # コンソールの認証情報でログイン (ブラウザが開く)
 ./target/release/awsr sso login --profile dev   # IAM Identity Center にログイン
-./target/release/awsr help                      # サービス一覧
-./target/release/awsr sts help                  # オペレーション一覧
-./target/release/awsr sts assume-role help      # 引数一覧
+./target/release/awsr ec2 describe-instances --output table
+./target/release/awsr sts get-caller-identity --output yaml
+./target/release/awsr ec2 wait instance-running --instance-ids i-1234567890abcdef0
+./target/release/awsr dynamodb create-table --generate-cli-skeleton yaml-input > table.yaml
+./target/release/awsr dynamodb create-table --cli-input-yaml file://table.yaml
+./target/release/awsr help                      # aws help 相当 (ページャで表示)
+./target/release/awsr sts help                  # サービスのコマンド一覧
+./target/release/awsr sts assume-role help      # オプション, 例, 出力の説明
+```
+
+シェル補完 (本家の `aws_completer` と同じ方式)。`awsr_completer` という名前で `awsr` へのリンクを作るか、`awsr __complete` を使います (fish):
+
+```fish
+ln -s (pwd)/target/release/awsr ~/.local/bin/awsr_completer
+# fish
+complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_completer; end)'
+# bash: complete -C awsr_completer awsr
+# zsh:  autoload bashcompinit && bashcompinit && complete -C awsr_completer awsr
 ```
 
 対応している主な機能:
@@ -67,11 +88,17 @@ set -x AWS_PROFILE dev
 - `login` (ブラウザ + PKCE、`--remote` でコード貼り付け) — 本家 `aws login` と同じキャッシュとプロファイル設定 (`login_session`) を作成
 - `sso login` (sso-session 構成では PKCE、`--use-device-code` でデバイスコード方式) / `sso logout`
 - ページャ (`AWS_PAGER` → `cli_pager` → `PAGER` → `less`、端末出力のときだけ、`--no-cli-pager` で無効)
-- 引数: スカラー、リスト、JSON、shorthand 構文、`file://` / `fileb://`、`--cli-input-json`、blob の base64 (`--cli-binary-format`)
+- 引数: スカラー、リスト、JSON、shorthand 構文、`file://` / `fileb://`、`--cli-input-json` / `--cli-input-yaml`、blob の base64 (`--cli-binary-format`)
+- 本家の引数・コマンドの改名と非表示 (`ec2 create-image --reboot`、`sns subscribe --notification-endpoint`、削除されたコマンドなど)
+- 送信前のモデル検証 (本家と同じメッセージ、終了コード 252)
+- リトライ: standard モード (最大 3 回、指数バックオフ + ジッタ、リトライクォータ)。`retry_mode` / `max_attempts` (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`)
 - 自動ページング、`--max-items` / `--page-size` / `--starting-token`、`--no-paginate`
-- 出力: json / text / off、`--query` (JMESPath)
+- `wait` コマンド (waiters-2.json の全 waiter)
+- `--generate-cli-skeleton` (`input` / `yaml-input` / `output`)
+- 出力: json / text / table / yaml / yaml-stream / off、`--query` (JMESPath)、`--color` (table の色付け)
+- help: 本家の man ページと同じ構成 (説明、構文、オプション、グローバルオプション、例、出力)
 - 終了コード: 0 / 252 (引数エラー) / 253 (設定エラー) / 254 (サービスエラー) / 255 (その他)
 
 ## ライセンス
 
-Apache-2.0。`tests/fixtures/` 以下は aws-cli / botocore のテストフィクスチャ (Apache-2.0) の複製です。`tests/fixtures/aws-signing-test-suite-v4a/` は aws-c-auth (Apache-2.0、同ディレクトリに LICENSE を同梱) のテストスイートの複製です。
+Apache-2.0。`tests/fixtures/` 以下は aws-cli / botocore のテストフィクスチャ (Apache-2.0) の複製と、本家 CLI の出力から生成したフィクスチャです。`assets/cli.json` は aws-cli の `awscli/data/cli.json` の複製です。`tests/fixtures/aws-signing-test-suite-v4a/` は aws-c-auth (Apache-2.0、同ディレクトリに LICENSE を同梱) のテストスイートの複製です。
