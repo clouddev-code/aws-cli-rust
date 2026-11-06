@@ -3,7 +3,7 @@
 
 use crate::cli::params::{self, BinaryFormat, ParamContext};
 use crate::cli::{self, ArgTarget, ArgValue, Globals, UsageError};
-use crate::client::{self, ChecksumWhen, Client, ClientConfig, ClientError};
+use crate::client::{self, ChecksumWhen, Client, ClientConfig, ClientError, RetryConfig};
 use crate::credentials::Resolver;
 use crate::loader::Loader;
 use crate::model::{Operation, ServiceModel};
@@ -556,8 +556,19 @@ fn build_client<'a>(
             .env_var("AWS_SIGV4A_SIGNING_REGION_SET")
             .or_else(|| ctx.config.get(&profile, "sigv4a_signing_region_set"))
             .filter(|v| !v.is_empty()),
+        retry: retry_config(ctx, &profile)?,
     };
     Client::new(ctx, model, config, credentials).map_err(Failure::general)
+}
+
+/// `AWS_RETRY_MODE` / `retry_mode` and `AWS_MAX_ATTEMPTS` / `max_attempts`.
+pub(crate) fn retry_config(ctx: &Context, profile: &str) -> Result<RetryConfig, Failure> {
+    let get = |env: &str, key: &str| ctx.env_var(env).or_else(|| ctx.config.get(profile, key));
+    RetryConfig::parse(
+        get("AWS_RETRY_MODE", "retry_mode").as_deref(),
+        get("AWS_MAX_ATTEMPTS", "max_attempts").as_deref(),
+    )
+    .map_err(Failure::config)
 }
 
 /// `--region` -> `AWS_REGION` -> `AWS_DEFAULT_REGION` -> profile `region`.

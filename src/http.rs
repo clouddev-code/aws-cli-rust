@@ -120,6 +120,15 @@ impl Response {
 #[derive(Debug)]
 pub struct TransportError(pub String);
 
+impl TransportError {
+    /// Connect / read timeouts cost more retry quota
+    /// (`ConnectTimeoutError`, `ReadTimeoutError`).
+    pub fn is_timeout(&self) -> bool {
+        let m = self.0.to_ascii_lowercase();
+        m.contains("timeout") || m.contains("timed out")
+    }
+}
+
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)

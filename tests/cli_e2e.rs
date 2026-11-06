@@ -1198,3 +1198,125 @@ fn model_validation_runs_before_sending() {
         "Invalid type for parameter Entries[0].Detail, value: {}, type: <class 'dict'>, valid types: <class 'str'>"
     ));
 }
+
+fn status(code: u16, body: &str) -> Response {
+    Response {
+        status: code,
+        headers: vec![],
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+/// Run with recorded sleeps.
+fn run_recording_sleeps(
+    args: &[&str],
+    responses: Vec<Response>,
+    env: HashMap<String, String>,
+) -> Option<(Run, Vec<std::time::Duration>)> {
+    let loader = common::loader_or_skip()?;
+    let transport = FakeTransport::new(responses);
+    let sleeps = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let mut ctx = test_context(loader, &transport, env);
+    let recorder = sleeps.clone();
+    ctx.sleep = Box::new(move |d| recorder.borrow_mut().push(d));
+    let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = driver::run(&ctx, &argv, &mut out, &mut err);
+    drop(ctx);
+    let sleeps = sleeps.borrow().clone();
+    Some((
+        Run {
+            code,
+            stdout: String::from_utf8(out).unwrap(),
+            stderr: String::from_utf8(err).unwrap(),
+            requests: transport.requests.take(),
+        },
+        sleeps,
+    ))
+}
+
+#[test]
+fn standard_retries_transient_and_throttling_errors() {
+    let identity = r#"<GetCallerIdentityResponse><GetCallerIdentityResult><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>"#;
+    let Some((r, sleeps)) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(503, ""), ok(identity)],
+        default_env(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.requests.len(), 2);
+    assert_eq!(r.requests[0].header("amz-sdk-request"), Some("attempt=1"));
+    assert_eq!(
+        r.requests[1].header("amz-sdk-request"),
+        Some("attempt=2; max=3")
+    );
+    let id = r.requests[0].header("amz-sdk-invocation-id");
+    assert!(id.is_some());
+    assert_eq!(r.requests[1].header("amz-sdk-invocation-id"), id);
+    // rand * min(2 ** (attempt - 1), 20) with attempt 1.
+    assert_eq!(sleeps.len(), 1);
+    assert!(sleeps[0] < std::time::Duration::from_secs(1));
+
+    // Throttling is retried until max_attempts, then reported.
+    let throttled = r#"<ErrorResponse><Error><Code>Throttling</Code><Message>Rate exceeded</Message></Error></ErrorResponse>"#;
+    let (r, sleeps) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![
+            status(400, throttled),
+            status(400, throttled),
+            status(400, throttled),
+        ],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 254);
+    assert_eq!(r.requests.len(), 3);
+    assert_eq!(sleeps.len(), 2);
+    assert!(sleeps[1] < std::time::Duration::from_secs(2));
+    assert!(r.stderr.contains("(Throttling)"), "{}", r.stderr);
+
+    // Non-retryable errors are not retried.
+    let invalid = r#"<ErrorResponse><Error><Code>InvalidClientTokenId</Code><Message>bad</Message></Error></ErrorResponse>"#;
+    let (r, _) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(403, invalid)],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1);
+
+    // max_attempts and retry_mode.
+    let mut env = default_env();
+    env.insert("AWS_MAX_ATTEMPTS".into(), "1".into());
+    let (r, _) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(500, ""), ok(identity)],
+        env,
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1);
+    assert_ne!(r.code, 0);
+    let mut env = default_env();
+    env.insert("AWS_RETRY_MODE".into(), "legacy".into());
+    let (r, _) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(500, ""), ok(identity)],
+        env,
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1);
+    let mut env = default_env();
+    env.insert("AWS_RETRY_MODE".into(), "bogus".into());
+    let (r, _) = run_recording_sleeps(&["sts", "get-caller-identity"], vec![], env).unwrap();
+    assert_eq!(r.code, 253);
+    assert!(r.stderr.contains("retry_mode"), "{}", r.stderr);
+
+    // Connection errors are retried too.
+    let (r, sleeps) =
+        run_recording_sleeps(&["sts", "get-caller-identity"], vec![], default_env()).unwrap();
+    assert_eq!(r.requests.len(), 3);
+    assert_eq!(sleeps.len(), 2);
+    assert_eq!(r.code, 255);
+}
