@@ -4,6 +4,7 @@ pub mod checksum;
 pub mod cli;
 pub mod client;
 pub mod commands;
+pub mod completion;
 pub mod config;
 pub mod context;
 pub mod credentials;

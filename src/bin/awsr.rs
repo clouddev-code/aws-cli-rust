@@ -120,8 +120,47 @@ fn timeout(args: &[String], flag: &str) -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
+/// Shell completion, like awscli's `aws_completer`: run as `awsr_completer`
+/// (a link to this binary) or `awsr __complete`. Reads the command line from
+/// `COMP_LINE` up to `COMP_POINT` and prints one candidate per line.
+///
+/// - bash: `complete -C awsr_completer awsr`
+/// - zsh: `autoload bashcompinit && bashcompinit && complete -C awsr_completer awsr`
+/// - fish: `complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_completer; end)'`
+fn complete() {
+    let Ok(line) = std::env::var("COMP_LINE") else {
+        eprintln!("awsr_completer: COMP_LINE is not set");
+        std::process::exit(1);
+    };
+    let point = std::env::var("COMP_POINT")
+        .ok()
+        .and_then(|p| p.parse::<usize>().ok())
+        .unwrap_or(line.len())
+        .min(line.len());
+    let mut end = point;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let Ok(loader) = driver::default_loader() else {
+        return;
+    };
+    let config = SharedConfig::load();
+    let mut out = std::io::stdout().lock();
+    for candidate in awsr::completion::complete(&loader, &config, &line[..end]) {
+        let _ = writeln!(out, "{candidate}");
+    }
+}
+
 fn main() {
+    let program = std::env::args().next().unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let as_completer = std::path::Path::new(&program)
+        .file_stem()
+        .is_some_and(|s| s == "awsr_completer");
+    if as_completer || args.first().map(String::as_str) == Some("__complete") {
+        complete();
+        return;
+    }
     let loader = match driver::default_loader() {
         Ok(l) => l,
         Err(e) => {
