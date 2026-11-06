@@ -192,8 +192,8 @@ fn ec2_shorthand_filters_lists_and_text_output() {
 #[test]
 fn dynamodb_auto_pagination_json_protocol() {
     let pages = vec![
-        ok(r#"{"TableNames":["a","b"],"LastEvaluatedTableName":"b"}"#),
-        ok(r#"{"TableNames":["c"]}"#),
+        ok(r#"{"TableNames":["t-a","t-b"],"LastEvaluatedTableName":"t-b"}"#),
+        ok(r#"{"TableNames":["t-c"]}"#),
     ];
     let Some(r) = run(&["dynamodb", "list-tables", "--page-size", "2"], pages) else {
         return;
@@ -212,10 +212,13 @@ fn dynamodb_auto_pagination_json_protocol() {
     assert_eq!(body(first), r#"{"Limit":2}"#);
     assert_eq!(
         body(&r.requests[1]),
-        r#"{"Limit":2,"ExclusiveStartTableName":"b"}"#
+        r#"{"Limit":2,"ExclusiveStartTableName":"t-b"}"#
     );
     let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
-    assert_eq!(out, serde_json::json!({"TableNames": ["a", "b", "c"]}));
+    assert_eq!(
+        out,
+        serde_json::json!({"TableNames": ["t-a", "t-b", "t-c"]})
+    );
 }
 
 #[test]
@@ -882,7 +885,7 @@ fn eventbridge_global_endpoint_uses_sigv4a() {
         "--endpoint-id",
         "abc.xyz",
         "--entries",
-        "Source=app,DetailType=t,Detail={}",
+        "Source=app,DetailType=t,Detail=\"{}\"",
     ];
     let reply = || ok(r#"{"FailedEntryCount":0,"Entries":[{"EventId":"e1"}]}"#);
     let Some(r) = run(&args, vec![reply()]) else {
@@ -1077,7 +1080,7 @@ fn argument_renames_hidden_aliases_and_removed_commands() {
                 "--instance-id",
                 "i-1",
                 "--name",
-                "n",
+                "image",
                 flag,
             ],
             vec![ok(
@@ -1158,4 +1161,40 @@ fn manual_paging_token_is_hidden_but_disables_pagination() {
     assert!(body(&r.requests[0]).contains("NextToken=t1"));
     let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
     assert_eq!(out["NextToken"], "t2");
+}
+
+#[test]
+fn model_validation_runs_before_sending() {
+    // Same report as botocore's ParamValidator (checked against awscli).
+    let Some(r) = run(
+        &[
+            "dynamodb",
+            "list-tables",
+            "--exclusive-start-table-name",
+            "b",
+        ],
+        vec![],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 252);
+    assert_eq!(
+        r.stderr,
+        "\nParameter validation failed:\nInvalid length for parameter ExclusiveStartTableName, value: 1, valid min length: 3\n"
+    );
+    assert!(r.requests.is_empty());
+    let r = run(
+        &[
+            "events",
+            "put-events",
+            "--entries",
+            "Source=app,DetailType=t,Detail={}",
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains(
+        "Invalid type for parameter Entries[0].Detail, value: {}, type: <class 'dict'>, valid types: <class 'str'>"
+    ));
 }

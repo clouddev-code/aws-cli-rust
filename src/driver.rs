@@ -636,6 +636,9 @@ fn client_failure(e: ClientError, op_name: &str) -> Failure {
             ),
         },
         ClientError::Params(m) => Failure::usage(format!("Parameter validation failed: {m}")),
+        ClientError::Validation(r) => {
+            Failure::usage(format!("\nParameter validation failed:\n{r}"))
+        }
         other => Failure::general(other),
     }
 }

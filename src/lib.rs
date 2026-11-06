@@ -21,4 +21,5 @@ pub mod protocol;
 pub mod sigv4;
 pub mod timestamp;
 pub mod util;
+pub mod validate;
 pub mod value;

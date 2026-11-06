@@ -32,6 +32,8 @@ const SECRET_HEADERS: &[&str] = &[
 pub enum ClientError {
     /// Bad parameters for the operation.
     Params(String),
+    /// The model validation report (`ParamValidationError`).
+    Validation(String),
     Endpoint(String),
     Transport(String),
     Service(Box<ServiceError>),
@@ -42,6 +44,7 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::Params(m) => write!(f, "Parameter validation failed: {m}"),
+            ClientError::Validation(r) => write!(f, "Parameter validation failed:\n{r}"),
             ClientError::Endpoint(m) | ClientError::Transport(m) | ClientError::Other(m) => {
                 f.write_str(m)
             }
@@ -139,6 +142,9 @@ impl<'a> Client<'a> {
         let endpoint = RuleSet::new(&self.rules, &self.partitions)
             .resolve(&self.endpoint_params(&op, params))
             .map_err(|e| ClientError::Endpoint(e.to_string()))?;
+        if let Some(input) = op.input() {
+            crate::validate::validate(params, &input).map_err(ClientError::Validation)?;
+        }
         let serialized =
             ser::serialize(&op, params).map_err(|e| ClientError::Params(e.to_string()))?;
         let mut req = serialized.into_request(&endpoint.url);
