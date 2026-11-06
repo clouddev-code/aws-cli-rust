@@ -12,6 +12,7 @@ pub mod doc;
 pub mod driver;
 pub mod eaw;
 pub mod endpoint;
+pub mod help;
 pub mod http;
 pub mod loader;
 pub mod model;

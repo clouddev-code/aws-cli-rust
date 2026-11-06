@@ -164,6 +164,17 @@ impl Loader {
         ServiceModel::from_json(service, raw).map_err(|e| LoadError(e.to_string()))
     }
 
+    /// An authored examples file (`awscli/examples/<command>/<sub...>.rst`),
+    /// looked up next to the botocore data directory.
+    pub fn example(&self, path: &[&str]) -> Option<String> {
+        let mut file = self.root.parent()?.parent()?.join("examples");
+        for p in path {
+            file.push(p);
+        }
+        file.set_extension("rst");
+        fs::read_to_string(file).ok()
+    }
+
     pub fn partitions(&self) -> Result<serde_json::Value, LoadError> {
         read_json(&self.root.join("partitions.json"))
     }

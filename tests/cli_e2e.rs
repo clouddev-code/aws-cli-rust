@@ -830,16 +830,16 @@ fn help_and_version() {
     let Some(r) = run(&["help"], vec![]) else {
         return;
     };
-    assert!(r.stdout.contains("  s3api\n") && r.stdout.contains("  ec2\n"));
+    assert!(r.stdout.contains("       o s3api\n") && r.stdout.contains("       o ec2\n"));
     let Some(r) = run(&["sts", "help"], vec![]) else {
         return;
     };
-    assert!(r.stdout.contains("  get-caller-identity\n"));
+    assert!(r.stdout.contains("       o get-caller-identity\n"));
     let Some(r) = run(&["dynamodb", "describe-table", "help"], vec![]) else {
         return;
     };
     assert!(
-        r.stdout.contains("--table-name (string) (required)"),
+        r.stdout.contains("       --table-name (string) [required]\n"),
         "{}",
         r.stdout
     );
@@ -1575,4 +1575,38 @@ fn waiters_poll_until_a_final_state() {
 
     let r = run(&["ec2", "wait", "bogus-state"], vec![]).unwrap();
     assert_eq!(r.code, 252);
+}
+
+#[test]
+fn help_pages_match_awscli_man_output() {
+    let fixture = |name: &str| {
+        let text = std::fs::read_to_string(common::fixtures().join("help").join(name)).unwrap();
+        // See tests/fixtures/help/README.md.
+        text.replace(" .\n", ".\n")
+    };
+    let Some(r) = run(&["sts", "get-caller-identity", "help"], vec![]) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, fixture("sts_get-caller-identity.txt"));
+    let r = run(&["ec2", "wait", "help"], vec![]).unwrap();
+    assert_eq!(r.stdout, fixture("ec2_wait.txt"));
+    // Waiter state pages, renamed and boolean arguments, outfile.
+    let r = run(&["ec2", "create-image", "help"], vec![]).unwrap();
+    assert!(r.stdout.contains("[--no-reboot | --reboot]"));
+    let r = run(&["s3api", "get-object", "help"], vec![]).unwrap();
+    assert!(r.stdout.contains("\n          <outfile>\n"));
+    assert!(
+        r.stdout
+            .contains("outfile (string) [required] Filename where the content will be saved")
+    );
+    let r = run(&["ec2", "wait", "instance-running", "help"], vec![]).unwrap();
+    assert!(
+        r.stdout
+            .contains("Wait until JMESPath query Reservations[].Instances[].State.Name returns")
+    );
+    assert!(r.stdout.contains("OUTPUT\n       None\n"));
+    let r = run(&["help"], vec![]).unwrap();
+    assert!(r.stdout.contains("AVAILABLE SERVICES"));
+    assert!(r.stdout.contains("       o s3api\n"));
 }

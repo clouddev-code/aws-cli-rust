@@ -93,11 +93,18 @@ fn run_inner(
         ));
     };
     if command == "help" {
-        let _ = writeln!(out, "Available services:");
-        for c in ctx.loader.command_names() {
-            let _ = writeln!(out, "  {c}");
-        }
-        return Ok(());
+        let mut commands = ctx.loader.command_names();
+        commands.push("login".into());
+        commands.sort();
+        let page = crate::help::top_level(&commands);
+        return emit(
+            ctx,
+            &globals,
+            &profile_name(ctx, &globals),
+            page.as_bytes(),
+            out,
+        )
+        .map_err(Failure::general);
     }
     if command == "login" {
         let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
@@ -130,13 +137,6 @@ fn run_inner(
             "aws: error: the following arguments are required: operation (try 'awsr {command} help')"
         )));
     };
-    if sub == "help" {
-        let _ = writeln!(out, "Available operations for {command}:");
-        for c in commands.iter().filter(|c| !c.hidden) {
-            let _ = writeln!(out, "  {}", c.cli_name);
-        }
-        return Ok(());
-    }
     // `wait <waiter-name>` (customizations/waiters.py) runs the waiter's
     // operation until it reaches a final state.
     let waiters = ctx
@@ -146,6 +146,28 @@ fn run_inner(
         .flatten()
         .map(|doc| crate::waiter::waiters(&doc))
         .unwrap_or_default();
+    if sub == "help" {
+        let mut names: Vec<String> = commands
+            .iter()
+            .filter(|c| !c.hidden)
+            .map(|c| c.cli_name.clone())
+            .collect();
+        if !waiters.is_empty() {
+            names.push("wait".into());
+        }
+        if command == "sso" {
+            names.extend(["login".to_string(), "logout".to_string()]);
+        }
+        let page = crate::help::command_list(command, model.documentation(), &names, true);
+        return emit(
+            ctx,
+            &globals,
+            &profile_name(ctx, &globals),
+            page.as_bytes(),
+            out,
+        )
+        .map_err(Failure::general);
+    }
     let waiter = if sub == "wait" && !waiters.is_empty() {
         let Some(name) = positionals.get(2).map(|s| s.as_str()) else {
             return Err(Failure::usage(format!(
@@ -153,11 +175,24 @@ fn run_inner(
             )));
         };
         if name == "help" {
-            let _ = writeln!(out, "Available waiters for {command}:");
-            for w in &waiters {
-                let _ = writeln!(out, "  {}", crate::waiter::waiter_cli_name(&w.name));
-            }
-            return Ok(());
+            let names: Vec<String> = waiters
+                .iter()
+                .map(|w| crate::waiter::waiter_cli_name(&w.name))
+                .collect();
+            let page = crate::help::command_list(
+                "wait",
+                "Wait until a particular condition is satisfied. Each subcommand polls an API until the listed requirement is met.",
+                &names,
+                false,
+            );
+            return emit(
+                ctx,
+                &globals,
+                &profile_name(ctx, &globals),
+                page.as_bytes(),
+                out,
+            )
+            .map_err(Failure::general);
         }
         let w = waiters
             .iter()
@@ -217,8 +252,27 @@ fn run_inner(
 
     let op_tokens: Vec<String> = rest.iter().skip(args_from).cloned().collect();
     if op_tokens.first().map(String::as_str) == Some("help") {
-        print_op_help(&op, &table, out);
-        return Ok(());
+        let examples = match &waiter {
+            Some(_) => ctx.loader.example(&[command, "wait", &cli_op]),
+            None => ctx.loader.example(&[command, &cli_op]),
+        };
+        let page = crate::help::operation(&crate::help::OperationPage {
+            name: &cli_op,
+            op: &op,
+            description: waiter.as_ref().map(crate::waiter::description),
+            table: &table,
+            paginator: paginator.as_ref(),
+            examples,
+            show_output: waiter.is_none(),
+        });
+        return emit(
+            ctx,
+            &globals,
+            &profile_name(ctx, &globals),
+            page.as_bytes(),
+            out,
+        )
+        .map_err(Failure::general);
     }
     let parsed = cli::parse_op_args(&op_tokens, &table)?;
     if globals.no_paginate {
@@ -582,35 +636,6 @@ fn yaml_to_json(y: &yaml_rust2::Yaml) -> J {
         ),
         Yaml::Null | Yaml::Alias(_) | Yaml::BadValue => J::Null,
     }
-}
-
-fn print_op_help(op: &Operation, table: &[cli::ArgDef], out: &mut dyn Write) {
-    let _ = writeln!(out, "{}\n", cli_name(&op.name));
-    let doc = strip_tags(op.documentation());
-    if !doc.is_empty() {
-        let _ = writeln!(out, "{doc}\n");
-    }
-    let _ = writeln!(out, "Options:");
-    let input = op.input();
-    for def in table {
-        let ty = match (&def.target, &input) {
-            (ArgTarget::Member(m), Some(s)) => s
-                .member_named(m)
-                .map(|x| x.type_name().to_string())
-                .unwrap_or_default(),
-            _ => "string".into(),
-        };
-        let req = if def.required { " (required)" } else { "" };
-        let _ = writeln!(out, "  {} ({ty}){req}", def.cli_name);
-    }
-}
-
-fn strip_tags(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    re.replace_all(s, "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Resolve region and credentials and build the API client.
