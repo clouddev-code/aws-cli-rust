@@ -533,6 +533,14 @@ impl Emitter {
     }
 }
 
+/// A string as a YAML scalar on one line (plain if possible, else quoted),
+/// as a mapping key (`key = true`) or value.
+pub fn scalar(s: &str, key: bool) -> String {
+    let mut e = Emitter::new();
+    e.scalar(s, key);
+    e.out
+}
+
 /// `YAMLDumper.dump`: scalars are written as JSON (awscli avoids the YAML
 /// document end marker that way); everything else as a block YAML document.
 pub fn dump(v: &J) -> String {

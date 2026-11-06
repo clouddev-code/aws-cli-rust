@@ -131,16 +131,29 @@ impl Loader {
             .ok_or_else(|| LoadError(format!("no API version for {service}")))
     }
 
+    /// Load `<service>/<latest version>/<file>`, with the matching
+    /// `*.sdk-extras.json` merged in (`Loader.load_service_model` +
+    /// `ExtrasProcessor`).
     pub fn load_json(
         &self,
         service: &str,
         file: &str,
     ) -> Result<Option<serde_json::Value>, LoadError> {
-        let path = self.version_dir(service)?.join(file);
+        let dir = self.version_dir(service)?;
+        let path = dir.join(file);
         if !path.is_file() {
             return Ok(None);
         }
-        read_json(&path).map(Some)
+        let mut doc = read_json(&path)?;
+        if let Some(stem) = file.strip_suffix(".json") {
+            let extras = dir.join(format!("{stem}.sdk-extras.json"));
+            if extras.is_file()
+                && let Some(merge) = read_json(&extras)?.get("merge")
+            {
+                deep_merge(&mut doc, merge);
+            }
+        }
+        Ok(Some(doc))
     }
 
     pub fn service_model(&self, service: &str) -> Result<ServiceModel, LoadError> {
@@ -187,6 +200,24 @@ pub fn customize_model(service: &str, raw: &mut serde_json::Value) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// botocore `utils.deep_merge`: objects merge recursively, anything else in
+/// `extra` replaces the base value.
+pub fn deep_merge(base: &mut serde_json::Value, extra: &serde_json::Value) {
+    let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) else {
+        return;
+    };
+    for (key, value) in extra {
+        match base.get_mut(key) {
+            Some(existing) if existing.is_object() && value.is_object() => {
+                deep_merge(existing, value)
+            }
+            _ => {
+                base.insert(key.clone(), value.clone());
+            }
         }
     }
 }

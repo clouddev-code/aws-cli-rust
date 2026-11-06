@@ -10,6 +10,7 @@ use crate::model::{Operation, ServiceModel};
 use crate::naming::cli_name;
 use crate::output::{self, OutputFormat};
 use crate::paginate::{self, PaginationArgs, PaginatorConfig};
+use crate::skeleton;
 use crate::value::{TimestampStyle, Value};
 use serde_json::Value as J;
 use std::io::Write;
@@ -276,6 +277,17 @@ fn run_inner(
     if let Some((target, raw)) = cli_input {
         merge_cli_input(&target, &raw, &mut call_params, binary_format)?;
     }
+    match skeleton.as_deref() {
+        Some("input") => {
+            let _ = out.write_all(skeleton::input_json(input.as_ref()).as_bytes());
+            return Ok(());
+        }
+        Some("yaml-input") => {
+            let _ = out.write_all(skeleton::yaml_input(input.as_ref()).as_bytes());
+            return Ok(());
+        }
+        _ => {}
+    }
     if let Some(shape) = &input {
         let missing: Vec<String> = shape
             .required()
@@ -302,6 +314,19 @@ fn run_inner(
         }
     }
     let call_params = Value::Map(call_params);
+
+    // `--generate-cli-skeleton output` validates the input and prints a
+    // sample response instead of calling the service.
+    if skeleton.as_deref() == Some("output") {
+        if let Some(shape) = &input {
+            crate::validate::validate(&call_params, shape)
+                .map_err(|r| client_failure(ClientError::Validation(r), &op.name))?;
+        }
+        let result = op.output().map_or(J::Object(Default::default()), |s| {
+            skeleton::generate(&s, true)
+        });
+        return render_output(ctx, &globals, &op.name, &result, out);
+    }
 
     let client = build_client(ctx, &globals, &model, &op)?;
     let call = |p: &Value, err: &mut dyn Write| {
@@ -330,10 +355,39 @@ fn run_inner(
         }
         Ok::<_, Failure>(v.to_json(TimestampStyle::Iso8601))
     };
+    // Fail on a bad --output / --color before calling the service.
+    output_settings(ctx, &globals, &op.name)?;
+
+    // A manual (undocumented) paging argument turns pagination off
+    // (`check_should_enable_pagination`), as does kinesis list-streams
+    // `--exclusive-start-stream-name` (kinesis.py).
+    let user_gave_token = paginator.as_ref().is_some_and(|p| {
+        p.input_tokens.iter().any(|t| call_params.get(t).is_some())
+            || p.limit_key
+                .as_ref()
+                .is_some_and(|k| call_params.get(k).is_some())
+    }) || (command == "kinesis"
+        && op.name == "ListStreams"
+        && call_params.get("ExclusiveStartStreamName").is_some());
+    let result = match &paginator {
+        Some(cfg) if !globals.no_paginate && !user_gave_token => {
+            paginate::paginate(cfg, &call_params, &pagination, |p| call(p, err))?
+        }
+        _ => call(&call_params, err)?,
+    };
+    render_output(ctx, &globals, &op.name, &result, out)
+}
+
+/// `--output` (or the profile's `output`) and the table style.
+fn output_settings(
+    ctx: &Context,
+    globals: &Globals,
+    title: &str,
+) -> Result<(OutputFormat, output::TableStyle), Failure> {
     let format = match globals
         .output
         .clone()
-        .or_else(|| setting(ctx, &globals, "output"))
+        .or_else(|| setting(ctx, globals, "output"))
     {
         None => OutputFormat::Json,
         Some(f) => OutputFormat::parse(&f).ok_or_else(|| {
@@ -353,37 +407,34 @@ fn run_inner(
             )));
         }
     };
-    let table_style = output::TableStyle {
-        title: op.name.clone(),
+    let style = output::TableStyle {
+        title: title.to_string(),
         terminal_width: ctx.terminal_width.unwrap_or(80),
         color,
     };
+    Ok((format, style))
+}
 
-    // A manual (undocumented) paging argument turns pagination off
-    // (`check_should_enable_pagination`), as does kinesis list-streams
-    // `--exclusive-start-stream-name` (kinesis.py).
-    let user_gave_token = paginator.as_ref().is_some_and(|p| {
-        p.input_tokens.iter().any(|t| call_params.get(t).is_some())
-            || p.limit_key
-                .as_ref()
-                .is_some_and(|k| call_params.get(k).is_some())
-    }) || (command == "kinesis"
-        && op.name == "ListStreams"
-        && call_params.get("ExclusiveStartStreamName").is_some());
-    let result = match &paginator {
-        Some(cfg) if !globals.no_paginate && !user_gave_token => {
-            paginate::paginate(cfg, &call_params, &pagination, |p| call(p, err))?
-        }
-        _ => call(&call_params, err)?,
-    };
-
+/// Apply `--query`, format the result and write it (through the pager).
+fn render_output(
+    ctx: &Context,
+    globals: &Globals,
+    title: &str,
+    result: &J,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let (format, style) = output_settings(ctx, globals, title)?;
+    let queried;
     let result = match &globals.query {
-        Some(q) => output::apply_query(q, &result).map_err(Failure::usage)?,
+        Some(q) => {
+            queried = output::apply_query(q, result).map_err(Failure::usage)?;
+            &queried
+        }
         None => result,
     };
     let mut rendered = Vec::new();
-    output::write(format, &result, &table_style, &mut rendered).map_err(Failure::general)?;
-    emit(ctx, &globals, &profile_name(ctx, &globals), &rendered, out).map_err(Failure::general)
+    output::write(format, result, &style, &mut rendered).map_err(Failure::general)?;
+    emit(ctx, globals, &profile_name(ctx, globals), &rendered, out).map_err(Failure::general)
 }
 
 /// `settings`: profile value from the shared config.

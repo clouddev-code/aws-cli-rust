@@ -1370,3 +1370,103 @@ fn table_and_yaml_output() {
     let r = run(&["sts", "get-caller-identity", "--color", "bogus"], vec![]).unwrap();
     assert_eq!(r.code, 252);
 }
+
+#[test]
+fn generate_cli_skeleton_matches_awscli() {
+    let cases = common::read_json(&common::fixtures().join("skeleton/cases.json"));
+    let mut failures = Vec::new();
+    for case in cases.as_array().unwrap() {
+        let (command, operation, mode) = (
+            case["command"].as_str().unwrap(),
+            case["operation"].as_str().unwrap(),
+            case["mode"].as_str().unwrap(),
+        );
+        let mut args = vec![command, operation, "--generate-cli-skeleton", mode];
+        // `output` keeps the required arguments.
+        let required: &[&str] = match (operation, mode) {
+            ("assume-role", "output") => &[
+                "--role-arn",
+                "arn:aws:iam::123456789012:role/r",
+                "--role-session-name",
+                "sess",
+            ],
+            ("create-table", "output") => &[
+                "--table-name",
+                "tbl",
+                "--attribute-definitions",
+                "AttributeName=a,AttributeType=S",
+                "--key-schema",
+                "AttributeName=a,KeyType=HASH",
+            ],
+            ("put-item", "output") => &["--table-name", "tbl", "--item", "{}"],
+            ("put-object", "output") => &["--bucket", "b", "--key", "k"],
+            ("set-queue-attributes", "output") => &["--queue-url", "u", "--attributes", "A=b"],
+            ("run-instances", "output") => &["--max-count", "1", "--min-count", "1"],
+            ("create-function", "output") => &[
+                "--function-name",
+                "f",
+                "--role",
+                "arn:aws:iam::123456789012:role/r",
+                "--code",
+                "ZipFile=YQ==",
+            ],
+            ("put-events", "output") => &["--entries", "Source=a"],
+            _ => &[],
+        };
+        args.extend_from_slice(required);
+        let Some(r) = run(&args, vec![]) else {
+            return;
+        };
+        if r.code != 0 || r.stdout != case["expected"].as_str().unwrap() {
+            failures.push(format!(
+                "{command} {operation} {mode} (exit {}): {}\n--- expected\n{}\n--- got\n{}",
+                r.code,
+                r.stderr,
+                case["expected"].as_str().unwrap(),
+                r.stdout
+            ));
+        }
+        assert!(r.requests.is_empty());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn cli_input_yaml_and_exclusivity() {
+    let reply = || ok(r#"{"TableNames":[]}"#);
+    let Some(r) = run(
+        &[
+            "dynamodb",
+            "list-tables",
+            "--cli-input-yaml",
+            "Limit: 5\nExclusiveStartTableName: tbl-a\n",
+            "--no-paginate",
+        ],
+        vec![reply()],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(
+        body(&r.requests[0]),
+        // Document order, like the Python dict botocore serializes.
+        r#"{"Limit":5,"ExclusiveStartTableName":"tbl-a"}"#
+    );
+    let r = run(
+        &[
+            "dynamodb",
+            "list-tables",
+            "--cli-input-yaml",
+            "Limit: 5",
+            "--cli-input-json",
+            "{}",
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(
+        r.stderr
+            .contains("Only one --cli-input- parameter may be specified.")
+    );
+}
