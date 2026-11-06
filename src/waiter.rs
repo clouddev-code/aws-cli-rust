@@ -113,7 +113,7 @@ impl Acceptor {
                 J::Array(items) => items.iter().any(|i| same(i, &self.expected)),
                 _ => false,
             },
-            ("status", r) => J::from(r.status()) == self.expected,
+            ("status", r) => self.expected.as_u64() == Some(u64::from(r.status())),
             ("error", r) => match (&self.expected, r) {
                 (J::Bool(true), r) => matches!(r, Response::Error { .. }),
                 (J::Bool(false), r) => matches!(r, Response::Ok { .. }),
