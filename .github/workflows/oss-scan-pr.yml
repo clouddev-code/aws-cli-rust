@@ -1,0 +1,212 @@
+# Scans a pull request for vulnerabilities in an isolated Lambda MicroVM via the oss-scan orchestrator.
+# Copy this file into the target repository. Same-repository PRs only: a fork gets no OIDC token.
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+#   OSS_SCAN_RUNNER_ROLE_ARN : the project's RunnerRoleArn output of OssScanMicrovmStack
+#   OSS_SCAN_BUCKET          : ScanBucketName output
+#   OSS_SCAN_PROJECT         : this repository's project name in the stack's ossScanProjects
+#
+# The result goes to one PR comment, updated on each push, and to annotations on the reported lines.
+# The job fails when a High or Critical candidate is reported as reproduced, or when the scan itself fails.
+# At most about 11 USD per run. Cancelling the job does not stop a scan that has started.
+name: oss-scan-pr
+
+on:
+  pull_request:
+
+permissions:
+  id-token: write       # OIDC → AWS (no long-lived AWS keys)
+  contents: read
+  pull-requests: write  # The result comment, with GITHUB_TOKEN (no GitHub credentials in AWS)
+
+# One scan at a time for the repository, because its microVMs share write access to results/ and one
+# image. Not cancelled: a cancelled job leaves its scan running and spending.
+concurrency:
+  group: oss-scan
+
+jobs:
+  scan:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # Prepare 75 + hunt 60 + verify 2 x 30 minutes. Must stay below the runner role's maxSessionDuration.
+    timeout-minutes: 225
+    env:
+      AWS_REGION: us-west-2
+      BUCKET: ${{ vars.OSS_SCAN_BUCKET }}
+      PROJECT: ${{ vars.OSS_SCAN_PROJECT }}
+      FUNCTION_NAME: oss-scan-orchestrator-${{ vars.OSS_SCAN_PROJECT }}
+      FUNCTION_ALIAS: live
+      ROLE_DURATION_SECONDS: 14400
+      AWS_RETRY_MODE: standard
+      AWS_MAX_ATTEMPTS: 5
+      # Same as the orchestrator's limit on one hunt scope; more files scan the whole repository.
+      MAX_CHANGED_FILES: 50
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # HEAD is the PR merge commit; its first parent is the base, which the diff needs.
+          fetch-depth: 2
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.OSS_SCAN_RUNNER_ROLE_ARN }}
+          aws-region: us-west-2
+          role-duration-seconds: ${{ env.ROLE_DURATION_SECONDS }}
+
+      - name: Upload code
+        id: upload
+        run: |
+          # Random part keeps result keys unguessable for code running in other microVMs.
+          scan_id="pr${{ github.event.pull_request.number }}-$(uuidgen | tr 'A-Z' 'a-z')"
+          git archive --format=zip -o "$RUNNER_TEMP/code.zip" HEAD
+          version_id=$(aws s3api put-object \
+            --bucket "$BUCKET" --key "uploads/${scan_id}/code.zip" \
+            --body "$RUNNER_TEMP/code.zip" --query VersionId --output text)
+          echo "scan_id=${scan_id}" >> "$GITHUB_OUTPUT"
+          echo "version_id=${version_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Start durable execution
+        env:
+          SCAN_ID: ${{ steps.upload.outputs.scan_id }}
+          VERSION_ID: ${{ steps.upload.outputs.version_id }}
+        run: |
+          # Not .github/: a PR can already rewrite this workflow, so scanning it finds nothing a PR is limited by.
+          git diff --name-only --diff-filter=d -z HEAD^1 HEAD -- . ':!.github' \
+            | jq -Rs --argjson max "$MAX_CHANGED_FILES" 'split("\u0000") | map(select(length > 0)) | if length > $max then null else . end' \
+            > "$RUNNER_TEMP/changed.json"
+          jq -n --arg scanId "$SCAN_ID" --arg versionId "$VERSION_ID" --slurpfile changed "$RUNNER_TEMP/changed.json" \
+            '{scanId: $scanId,
+              pullRequest: {codeKey: "uploads/\($scanId)/code.zip", codeVersionId: $versionId, changedFiles: $changed[0]},
+              limits: {hunt: {count: 1}, verify: {count: 2}, patch: {count: 0}}}' \
+            > "$RUNNER_TEMP/payload.json"
+          aws lambda invoke \
+            --function-name "$FUNCTION_NAME" --qualifier "$FUNCTION_ALIAS" \
+            --invocation-type Event \
+            --durable-execution-name "$SCAN_ID" \
+            --cli-binary-format raw-in-base64-out \
+            --payload "file://$RUNNER_TEMP/payload.json" \
+            "$RUNNER_TEMP/invoke.json"
+
+      - name: Wait for result
+        env:
+          SCAN_ID: ${{ steps.upload.outputs.scan_id }}
+        run: |
+          arn=""
+          for _ in $(seq 1 30); do
+            arn=$(aws lambda list-durable-executions-by-function \
+              --function-name "$FUNCTION_NAME" --durable-execution-name "$SCAN_ID" \
+              --query 'DurableExecutions[0].DurableExecutionArn' --output text) || arn=""
+            [ -n "$arn" ] && [ "$arn" != "None" ] && break
+            sleep 5
+          done
+          [ -n "$arn" ] && [ "$arn" != "None" ] || { echo "durable execution not found"; exit 1; }
+          echo "Durable execution: $arn"
+
+          # A polling error must not lose a run that may still be going: tolerate a streak of them.
+          fails=0
+          while :; do
+            if aws lambda get-durable-execution --durable-execution-arn "$arn" > "$RUNNER_TEMP/execution.json"; then
+              fails=0
+              status=$(jq -r .Status "$RUNNER_TEMP/execution.json")
+              [ "$status" != "RUNNING" ] && break
+            else
+              fails=$((fails + 1))
+              [ "$fails" -ge 10 ] && { echo "could not read the execution status"; exit 1; }
+            fi
+            sleep 30
+          done
+          echo "Execution status: $status"
+          if [ "$status" != "SUCCEEDED" ]; then
+            jq -r '.Error.ErrorMessage // "unknown"' "$RUNNER_TEMP/execution.json" | head -c 500
+            exit 1
+          fi
+          jq -r .Result "$RUNNER_TEMP/execution.json" > "$RUNNER_TEMP/result.json"
+          key=$(jq -r '.reportKey // empty' "$RUNNER_TEMP/result.json")
+          if [ -n "$key" ]; then
+            aws s3api get-object --bucket "$BUCKET" --key "$key" "$RUNNER_TEMP/report.json" > /dev/null
+          fi
+
+      - name: Report on the PR
+        if: ${{ !cancelled() && steps.upload.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Prints the annotations and writes the markdown used for both the job summary and the comment.
+          python3 - "$RUNNER_TEMP/report.md" <<'PY'
+          import html, json, os, re, sys
+          temp = os.environ["RUNNER_TEMP"]
+          def load(name):
+              try:
+                  return json.load(open(os.path.join(temp, name)))
+              except (OSError, ValueError):
+                  return None
+          result, report = load("result.json"), load("report.json")
+          # All of this is influenced by the scanned code: no @mentions, HTML escaped, fenced.
+          def safe(text):
+              return html.escape(str(text)).replace("@", "@\u200b").replace("`", "'")
+          def one_line(text):
+              return safe(" ".join(str(text).split()))
+          def fenced(text):
+              text = str(text)[:6000]
+              fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", text)), default=0) + 1)
+              return f"{fence}text\n{text}\n{fence}"
+          # Workflow command encoding, so that no value can end the command or start another one.
+          def command_data(text):
+              return str(text).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          def command_property(text):
+              return command_data(text).replace(":", "%3A").replace(",", "%2C")
+          lines = ["<!-- oss-scan-result -->", "### oss-scan", ""]
+          if result is None:
+              lines.append(f"The scan did not finish. See the [job log]({os.environ['RUN_URL']}).")
+          else:
+              lines.append(f"- status: `{safe(result.get('status'))}` / self-reported cost: {safe(result.get('reportedCostUsd'))} USD / scan: `{safe(result.get('scanId'))}`")
+          findings = (report or {}).get("findings", [])
+          if report is not None:
+              lines.append("- " + " / ".join(f"{safe(run['vmKey'])}: `{safe(run['status'])}`" for run in report["runs"]))
+              lines.append("")
+              lines.append(f"**{len(findings)} finding(s).** These are an agent's claims: `REPRODUCED` means another microVM saw the behaviour, not that it is exploitable. The job fails only on `REPRODUCED` High or Critical.")
+          for finding in findings:
+              candidate, verdict = finding["candidate"], finding["verdict"] or {}
+              location = candidate["location"]
+              severity = verdict.get("severity") or candidate["severity"]
+              gate = finding["verification"] == "REPRODUCED" and severity in ("Critical", "High")
+              lines.append(f"\n<details><summary><code>{one_line(finding['verification'])}</code> {one_line(severity)}: "
+                           f"{one_line(candidate['title'])} (<code>{one_line(location['file'])}:{one_line(location['line'])}</code>)</summary>\n")
+              lines.append(safe(verdict.get("rationale") or candidate["rationale"]))
+              lines.append("\n" + fenced(verdict.get("reproducer") or candidate["reproducer"]))
+              lines.append("\n" + fenced(verdict.get("reproducerOutput") or candidate["reproducerOutput"]))
+              lines.append("\n</details>")
+              level = "error" if gate else "warning"
+              print(f"::{level} file={command_property(location['file'])},line={int(location['line'])},"
+                    f"title={command_property(f'oss-scan {severity}: ' + candidate['title'][:200])}::"
+                    f"{command_data(finding['verification'] + ': ' + (verdict.get('rationale') or candidate['rationale'])[:1000])}")
+          lines.append(f"\n[Job log]({os.environ['RUN_URL']})")
+          body = "\n".join(lines)
+          if len(body) > 60000:
+              body = body[:60000] + f"\n\nTruncated. See the [job summary]({os.environ['RUN_URL']})."
+          open(sys.argv[1], "w").write(body)
+          PY
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          # One comment per PR, rewritten on each push, so that an old result never looks current.
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- oss-scan-result -->"))) | .id' | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F "body=@$RUNNER_TEMP/report.md" > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/report.md"
+          fi
+
+      - name: Fail on a reproduced High or Critical
+        run: |
+          status=$(jq -r '.status' "$RUNNER_TEMP/result.json")
+          count=0
+          if [ -f "$RUNNER_TEMP/report.json" ]; then
+            # The severity is verify's own judgement. Lower ones stay in the job summary only.
+            count=$(jq '[.findings[] | select(.verification == "REPRODUCED" and (.verdict.severity == "Critical" or .verdict.severity == "High"))] | length' "$RUNNER_TEMP/report.json")
+          fi
+          echo "status: $status, reproduced High or Critical: $count"
+          [ "$count" = "0" ] || exit 1
+          # Anything else means a part of the scan did not finish, so "nothing found" would not be true.
+          [ "$status" = "COMPLETED" ] || [ "$status" = "UNCHANGED" ] || exit 1
