@@ -136,3 +136,37 @@ fn every_operation_serializes() {
     );
     assert!(ops > 10_000, "only {ops} operations checked");
 }
+
+/// The embedded archive (latest versions, extras merged, minified) loads the
+/// same documents as the botocore data directory it was built from.
+#[test]
+fn embedded_models_match_the_data_directory() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("reference/aws-cli/awscli/botocore/data");
+    let (Some(embedded), true) = (awsr::loader::Loader::embedded(), dir.is_dir()) else {
+        eprintln!("SKIP: needs both the embedded models and the reference checkout");
+        return;
+    };
+    let fs = awsr::loader::Loader::new(&dir);
+    assert_eq!(embedded.service_dirs(), fs.service_dirs());
+    assert_eq!(embedded.partitions().unwrap(), fs.partitions().unwrap());
+    for service in fs.service_dirs() {
+        for file in [
+            "service-2.json",
+            "paginators-1.json",
+            "waiters-2.json",
+            "endpoint-rule-set-1.json",
+        ] {
+            assert_eq!(
+                embedded.load_json(&service, file).unwrap(),
+                fs.load_json(&service, file).unwrap(),
+                "{service}/{file}"
+            );
+        }
+    }
+    assert_eq!(
+        embedded.example(&["ec2", "wait", "instance-running"]),
+        fs.example(&["ec2", "wait", "instance-running"])
+    );
+    assert!(embedded.example(&["sts", "get-caller-identity"]).is_some());
+}

@@ -839,7 +839,8 @@ fn help_and_version() {
         return;
     };
     assert!(
-        r.stdout.contains("       --table-name (string) [required]\n"),
+        r.stdout
+            .contains("       --table-name (string) [required]\n"),
         "{}",
         r.stdout
     );

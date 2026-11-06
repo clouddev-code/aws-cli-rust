@@ -8,6 +8,12 @@ license = "Apache-2.0"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["embed-data"]
+# Compress the botocore models and awscli examples into the binary
+# (see build.rs).
+embed-data = ["dep:zstd"]
+
 [[bin]]
 name = "awsr"
 path = "src/bin/awsr.rs"
@@ -31,8 +37,20 @@ sha1 = "0.10"
 sha2 = "0.10"
 ureq = "3"
 yaml-rust2 = { version = "0.13", default-features = false }
+zstd = { version = "0.13", optional = true }
+
+[build-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+zstd = "0.13"
 
 # The data-driven tests evaluate ~14k endpoint rule cases and parse every
 # service model; optimizing dependencies keeps plain `cargo test` usable.
 [profile.dev.package."*"]
 opt-level = 2
+
+# build.rs compresses ~110 MB of models; an unoptimized zstd would take minutes.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
