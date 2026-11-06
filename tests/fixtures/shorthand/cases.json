@@ -1,0 +1,791 @@
+{
+ "parse": [
+  [
+   "foo=bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo=bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo=bar,baz=qux",
+   {
+    "foo": "bar",
+    "baz": "qux"
+   }
+  ],
+  [
+   "a=b,c=d,e=f",
+   {
+    "a": "b",
+    "c": "d",
+    "e": "f"
+   }
+  ],
+  [
+   "foo=",
+   {
+    "foo": ""
+   }
+  ],
+  [
+   "foo=,bar=",
+   {
+    "foo": "",
+    "bar": ""
+   }
+  ],
+  [
+   "foo=✓",
+   {
+    "foo": "✓"
+   }
+  ],
+  [
+   "foo=✓,✓",
+   {
+    "foo": [
+     "✓",
+     "✓"
+    ]
+   }
+  ],
+  [
+   "foo=a,b",
+   {
+    "foo": [
+     "a",
+     "b"
+    ]
+   }
+  ],
+  [
+   "foo=a,b,c",
+   {
+    "foo": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "foo=a,b,bar=c,d",
+   {
+    "foo": [
+     "a",
+     "b"
+    ],
+    "bar": [
+     "c",
+     "d"
+    ]
+   }
+  ],
+  [
+   "foo=a,b,c,bar=d,e,f",
+   {
+    "foo": [
+     "a",
+     "b",
+     "c"
+    ],
+    "bar": [
+     "d",
+     "e",
+     "f"
+    ]
+   }
+  ],
+  [
+   "foo=a,b=with space",
+   {
+    "foo": "a",
+    "b": "with space"
+   }
+  ],
+  [
+   "foo=a,b=with trailing space  ",
+   {
+    "foo": "a",
+    "b": "with trailing space"
+   }
+  ],
+  [
+   "foo=first space",
+   {
+    "foo": "first space"
+   }
+  ],
+  [
+   "foo=a space,bar=a space,baz=a space",
+   {
+    "foo": "a space",
+    "bar": "a space",
+    "baz": "a space"
+   }
+  ],
+  [
+   "with-dash=bar",
+   {
+    "with-dash": "bar"
+   }
+  ],
+  [
+   "with_underscore=bar",
+   {
+    "with_underscore": "bar"
+   }
+  ],
+  [
+   "with.dot=bar",
+   {
+    "with.dot": "bar"
+   }
+  ],
+  [
+   "#key=value",
+   {
+    "#key": "value"
+   }
+  ],
+  [
+   "some/thing=value",
+   {
+    "some/thing": "value"
+   }
+  ],
+  [
+   "aws:service:region:124:foo/bar=baz",
+   {
+    "aws:service:region:124:foo/bar": "baz"
+   }
+  ],
+  [
+   "foo=[]",
+   {
+    "foo": []
+   }
+  ],
+  [
+   "foo=[a]",
+   {
+    "foo": [
+     "a"
+    ]
+   }
+  ],
+  [
+   "foo=[a,b]",
+   {
+    "foo": [
+     "a",
+     "b"
+    ]
+   }
+  ],
+  [
+   "foo=[a,b,c]",
+   {
+    "foo": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "foo=[a,b],bar=c,d",
+   {
+    "foo": [
+     "a",
+     "b"
+    ],
+    "bar": [
+     "c",
+     "d"
+    ]
+   }
+  ],
+  [
+   "foo=[a,b],bar=[c,d]",
+   {
+    "foo": [
+     "a",
+     "b"
+    ],
+    "bar": [
+     "c",
+     "d"
+    ]
+   }
+  ],
+  [
+   "foo=a,b,bar=[c,d]",
+   {
+    "foo": [
+     "a",
+     "b"
+    ],
+    "bar": [
+     "c",
+     "d"
+    ]
+   }
+  ],
+  [
+   "foo=[a=b,c=d]",
+   {
+    "foo": [
+     "a=b",
+     "c=d"
+    ]
+   }
+  ],
+  [
+   "foo=[a=b,c=d]",
+   {
+    "foo": [
+     "a=b",
+     "c=d"
+    ]
+   }
+  ],
+  [
+   "foo=[ a , b  , c  ]",
+   {
+    "foo": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "foo  =  [ a , b  , c  ]",
+   {
+    "foo": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "foo=[,,]",
+   {
+    "foo": [
+     "",
+     ""
+    ]
+   }
+  ],
+  [
+   "foo='bar'",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo='bar,baz'",
+   {
+    "foo": "bar,baz"
+   }
+  ],
+  [
+   "foo='bar','baz'",
+   {
+    "foo": [
+     "bar",
+     "baz"
+    ]
+   }
+  ],
+  [
+   "foo=bar,'baz'",
+   {
+    "foo": [
+     "bar",
+     "baz"
+    ]
+   }
+  ],
+  [
+   "foo=bar,'baz=qux'",
+   {
+    "foo": [
+     "bar",
+     "baz=qux"
+    ]
+   }
+  ],
+  [
+   "foo=bar,'--option=bar space'",
+   {
+    "foo": [
+     "bar",
+     "--option=bar space"
+    ]
+   }
+  ],
+  [
+   "foo='bar\\'baz'",
+   {
+    "foo": "bar'baz"
+   }
+  ],
+  [
+   "foo='bar\\\\baz'",
+   {
+    "foo": "bar\\baz"
+   }
+  ],
+  [
+   "foo=\"bar\"",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo=\"bar,baz\"",
+   {
+    "foo": "bar,baz"
+   }
+  ],
+  [
+   "foo=\"bar\",\"baz\"",
+   {
+    "foo": [
+     "bar",
+     "baz"
+    ]
+   }
+  ],
+  [
+   "foo=bar,\"baz=qux\"",
+   {
+    "foo": [
+     "bar",
+     "baz=qux"
+    ]
+   }
+  ],
+  [
+   "foo=bar,\"--option=bar space\"",
+   {
+    "foo": [
+     "bar",
+     "--option=bar space"
+    ]
+   }
+  ],
+  [
+   "foo=\"bar\\\"baz\"",
+   {
+    "foo": "bar\"baz"
+   }
+  ],
+  [
+   "foo=\"bar\\\\baz\"",
+   {
+    "foo": "bar\\baz"
+   }
+  ],
+  [
+   "foo=a\\,b",
+   {
+    "foo": "a,b"
+   }
+  ],
+  [
+   "foo=a\\,b",
+   {
+    "foo": "a,b"
+   }
+  ],
+  [
+   "foo=a\\,",
+   {
+    "foo": "a,"
+   }
+  ],
+  [
+   "foo=\\,",
+   {
+    "foo": ","
+   }
+  ],
+  [
+   "foo=a,b\\,c",
+   {
+    "foo": [
+     "a",
+     "b,c"
+    ]
+   }
+  ],
+  [
+   "foo=a,b\\,",
+   {
+    "foo": [
+     "a",
+     "b,"
+    ]
+   }
+  ],
+  [
+   "foo=a,\\,bc",
+   {
+    "foo": [
+     "a",
+     ",bc"
+    ]
+   }
+  ],
+  [
+   "foo= bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo =bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo = bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo  =   bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo = bar,baz = qux",
+   {
+    "foo": "bar",
+    "baz": "qux"
+   }
+  ],
+  [
+   "a = b,  c = d , e = f",
+   {
+    "a": "b",
+    "c": "d",
+    "e": "f"
+   }
+  ],
+  [
+   "foo = ",
+   {
+    "foo": ""
+   }
+  ],
+  [
+   "a=b,c=  d,  e,  f",
+   {
+    "a": "b",
+    "c": [
+     "d",
+     "e",
+     "f"
+    ]
+   }
+  ],
+  [
+   "Name=foo,Values=  a  ,  b  ,  c  ",
+   {
+    "Name": "foo",
+    "Values": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "Name=foo,Values= a,  b  ,  c",
+   {
+    "Name": "foo",
+    "Values": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "Name=foo,\nValues=a,b,c",
+   {
+    "Name": "foo",
+    "Values": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "A=b,\nC=d,\nE=f\n",
+   {
+    "A": "b",
+    "C": "d",
+    "E": "f"
+   }
+  ],
+  [
+   "Name={foo=bar,baz=qux}",
+   {
+    "Name": {
+     "foo": "bar",
+     "baz": "qux"
+    }
+   }
+  ],
+  [
+   "Name={foo=[a,b,c],bar=baz}",
+   {
+    "Name": {
+     "foo": [
+      "a",
+      "b",
+      "c"
+     ],
+     "bar": "baz"
+    }
+   }
+  ],
+  [
+   "Name={foo=bar},Bar=baz",
+   {
+    "Name": {
+     "foo": "bar"
+    },
+    "Bar": "baz"
+   }
+  ],
+  [
+   "Bar=baz,Name={foo=bar}",
+   {
+    "Bar": "baz",
+    "Name": {
+     "foo": "bar"
+    }
+   }
+  ],
+  [
+   "a={b={c=d}}",
+   {
+    "a": {
+     "b": {
+      "c": "d"
+     }
+    }
+   }
+  ],
+  [
+   "a={b={c=d,e=f},g=h}",
+   {
+    "a": {
+     "b": {
+      "c": "d",
+      "e": "f"
+     },
+     "g": "h"
+    }
+   }
+  ],
+  [
+   "Name=[{foo=bar}, {baz=qux}]",
+   {
+    "Name": [
+     {
+      "foo": "bar"
+     },
+     {
+      "baz": "qux"
+     }
+    ]
+   }
+  ],
+  [
+   "Name=[{foo=[a,b]}, {bar=[c,d]}]",
+   {
+    "Name": [
+     {
+      "foo": [
+       "a",
+       "b"
+      ]
+     },
+     {
+      "bar": [
+       "c",
+       "d"
+      ]
+     }
+    ]
+   }
+  ],
+  [
+   "foo@=bar",
+   {
+    "foo": "bar"
+   }
+  ],
+  [
+   "foo@=bar,baz@=qux",
+   {
+    "foo": "bar",
+    "baz": "qux"
+   }
+  ],
+  [
+   "foo@=,bar@=",
+   {
+    "foo": "",
+    "bar": ""
+   }
+  ],
+  [
+   "foo@=✓,✓",
+   {
+    "foo": [
+     "✓",
+     "✓"
+    ]
+   }
+  ],
+  [
+   "foo@=a,b,bar=c,d",
+   {
+    "foo": [
+     "a",
+     "b"
+    ],
+    "bar": [
+     "c",
+     "d"
+    ]
+   }
+  ],
+  [
+   "foo=a,b@=with space",
+   {
+    "foo": "a",
+    "b": "with space"
+   }
+  ],
+  [
+   "foo=a,b@=with trailing space  ",
+   {
+    "foo": "a",
+    "b": "with trailing space"
+   }
+  ],
+  [
+   "aws:service:region:124:foo/bar@=baz",
+   {
+    "aws:service:region:124:foo/bar": "baz"
+   }
+  ],
+  [
+   "foo=[a,b],bar@=[c,d]",
+   {
+    "foo": [
+     "a",
+     "b"
+    ],
+    "bar": [
+     "c",
+     "d"
+    ]
+   }
+  ],
+  [
+   "foo  @=  [ a , b  , c  ]",
+   {
+    "foo": [
+     "a",
+     "b",
+     "c"
+    ]
+   }
+  ],
+  [
+   "A=b,\nC@=d,\nE@=f\n",
+   {
+    "A": "b",
+    "C": "d",
+    "E": "f"
+   }
+  ],
+  [
+   "Bar@=baz,Name={foo@=bar}",
+   {
+    "Bar": "baz",
+    "Name": {
+     "foo": "bar"
+    }
+   }
+  ],
+  [
+   "Name=[{foo@=bar}, {baz=qux}]",
+   {
+    "Name": [
+     {
+      "foo": "bar"
+     },
+     {
+      "baz": "qux"
+     }
+    ]
+   }
+  ],
+  [
+   "Name=[{foo@=[a,b]}, {bar=[c,d]}]",
+   {
+    "Name": [
+     {
+      "foo": [
+       "a",
+       "b"
+      ]
+     },
+     {
+      "bar": [
+       "c",
+       "d"
+      ]
+     }
+    ]
+   }
+  ]
+ ],
+ "errors": [
+  "foo",
+  "foo=\"bar",
+  "\"foo=bar",
+  "foo='bar",
+  "foo=[bar",
+  "foo={bar",
+  "foo={bar}",
+  "foo={bar=bar",
+  "foo=bar,",
+  "foo==bar,\nbar=baz",
+  "foo=bar,foo=qux",
+  "foo=\"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\",
+  "foo='\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"
+ ]
+}
