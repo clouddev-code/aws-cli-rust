@@ -117,9 +117,10 @@ fn refresh(r: &Resolver, token: &J) -> Result<J> {
     params.insert("tokenInput".into(), Value::Map(input));
 
     let now = (r.ctx.now)();
-    let jti = (r.ctx.uuid)();
+    // A fresh proof (iat, jti) for every attempt, as retries re-send.
     let add_dpop = |req: &mut Request| {
         let url = format!("{}://{}{}", req.scheme, req.host, req.path);
+        let (now, jti) = ((r.ctx.now)(), (r.ctx.uuid)());
         req.set_header("DPoP", dpop_proof(&key, &url, now.timestamp(), &jti));
     };
     let resp = client
@@ -350,9 +351,10 @@ pub fn interactive_login(
     let mut params = Map::new();
     params.insert("tokenInput".into(), Value::Map(input));
     let now = (ctx.now)();
-    let jti = (ctx.uuid)();
+    // A fresh proof (iat, jti) for every attempt, as retries re-send.
     let add_dpop = |req: &mut Request| {
         let url = format!("{}://{}{}", req.scheme, req.host, req.path);
+        let (now, jti) = ((ctx.now)(), (ctx.uuid)());
         req.set_header("DPoP", dpop_proof(&key, &url, now.timestamp(), &jti));
     };
     let resp = client

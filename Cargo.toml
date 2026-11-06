@@ -35,7 +35,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
 sha2 = "0.10"
-ureq = "3"
+# No `gzip`: like botocore, bodies must be the bytes the service sent so
+# CRC32 / flexible checksums can be checked against them.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 yaml-rust2 = { version = "0.13", default-features = false }
 zstd = { version = "0.13", optional = true }
 

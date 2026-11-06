@@ -151,6 +151,8 @@ pub struct UreqTransport {
 fn agent(connect: Option<std::time::Duration>, read: Option<std::time::Duration>) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // What Python's http.client sends for botocore.
+        .accept_encoding("identity")
         .timeout_connect(connect)
         .timeout_recv_body(read)
         .timeout_recv_response(read)

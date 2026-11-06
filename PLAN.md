@@ -157,4 +157,5 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
   /tmp/awscli-venv/bin/python tests/fixtures/output/generate.py > tests/fixtures/output/cases.json
   set -x AWS_DEFAULT_REGION us-east-1; /tmp/awscli-venv/bin/python tests/fixtures/skeleton/generate.py > tests/fixtures/skeleton/cases.json
   ```
+- ureq は `gzip` 機能を外し、`Accept-Encoding: identity` を送る (botocore = http.client と同じ)。自動解凍されると DynamoDB の `x-amz-crc32` やフレキシブルチェックサムの照合が本文と合わなくなるため。
 - `assets/cli.json` は aws-cli の `awscli/data/cli.json` (グローバル引数の説明) の複製。
