@@ -60,12 +60,9 @@ fn redirects_are_returned_not_followed() {
     let transport = UreqTransport::new(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)));
     let resp = transport.send(&req).unwrap();
     assert_eq!(resp.status, 302);
-    assert!(
-        server
-            .join()
-            .unwrap()
-            .contains("X-Amz-Security-Token: SECRET")
-    );
+    // Header names go out lowercased.
+    let head = server.join().unwrap().to_ascii_lowercase();
+    assert!(head.contains("x-amz-security-token: secret"), "{head}");
     std::thread::sleep(Duration::from_millis(100));
     assert!(other.accept().is_err(), "the redirect target was contacted");
 }
