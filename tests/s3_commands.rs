@@ -665,3 +665,309 @@ fn multipart_copy_encoding_and_limits() {
         "nothing written"
     );
 }
+
+fn set_mtime(path: &Path, secs: i64) {
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+fn mtime(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// 2015-08-30T12:00:00Z
+const T0: i64 = 1_440_936_000;
+
+#[test]
+fn sync_upload_compares_size_and_time_and_deletes() {
+    let (dir, rel) = scratch("sync-up");
+    std::fs::write(dir.join("same.txt"), b"1234").unwrap();
+    std::fs::write(dir.join("newer.txt"), b"1234").unwrap();
+    std::fs::write(dir.join("resized.txt"), b"12345").unwrap();
+    std::fs::write(dir.join("missing.txt"), b"x").unwrap();
+    std::fs::write(dir.join("skip.log"), b"x").unwrap();
+    set_mtime(&dir.join("same.txt"), T0 - 60);
+    set_mtime(&dir.join("newer.txt"), T0 + 60);
+    // S3 objects were last modified at T0.
+    let list = r#"<ListBucketResult>
+<Contents><Key>p/same.txt</Key><Size>4</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/newer.txt</Key><Size>4</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/resized.txt</Key><Size>4</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/extra.txt</Key><Size>1</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/keep.log</Key><Size>1</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+</ListBucketResult>"#;
+    let Some(r) = run_s3(
+        &["sync", &rel, "s3://bkt/p", "--delete", "--exclude", "*.log"],
+        CONFIG,
+        Box::new(move |req| match req.method.as_str() {
+            "GET" => ok(list),
+            "DELETE" => status(204, ""),
+            _ => ok(""),
+        }),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let mut lines: Vec<&str> = r.stdout.lines().collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        vec![
+            "delete: s3://bkt/p/extra.txt".to_string(),
+            format!("upload: {rel}/missing.txt to s3://bkt/p/missing.txt"),
+            format!("upload: {rel}/newer.txt to s3://bkt/p/newer.txt"),
+            format!("upload: {rel}/resized.txt to s3://bkt/p/resized.txt"),
+        ]
+    );
+    // --size-only ignores times.
+    let r = run_s3(
+        &[
+            "sync",
+            &rel,
+            "s3://bkt/p",
+            "--size-only",
+            "--exclude",
+            "*.log",
+            "--dryrun",
+        ],
+        CONFIG,
+        Box::new(move |_| ok(list)),
+    )
+    .unwrap();
+    let mut lines: Vec<&str> = r.stdout.lines().collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        vec![
+            format!("(dryrun) upload: {rel}/missing.txt to s3://bkt/p/missing.txt"),
+            format!("(dryrun) upload: {rel}/resized.txt to s3://bkt/p/resized.txt"),
+        ]
+    );
+}
+
+#[test]
+fn sync_download_time_rules_and_mtime() {
+    let (dir, rel) = scratch("sync-down");
+    std::fs::write(dir.join("older.txt"), b"abcd").unwrap();
+    std::fs::write(dir.join("newer.txt"), b"abcd").unwrap();
+    std::fs::write(dir.join("stale.txt"), b"x").unwrap();
+    set_mtime(&dir.join("older.txt"), T0 - 60);
+    set_mtime(&dir.join("newer.txt"), T0 + 60);
+    let list = r#"<ListBucketResult>
+<Contents><Key>p/older.txt</Key><Size>4</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/newer.txt</Key><Size>4</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/new.txt</Key><Size>3</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+</ListBucketResult>"#;
+    let handler = move |req: &Request| {
+        if query(req, "list-type").is_some() {
+            ok(list)
+        } else if req.path.ends_with("new.txt") && !req.path.ends_with("newer.txt") {
+            ok("new")
+        } else {
+            ok("ABCD")
+        }
+    };
+    let Some(r) = run_s3(
+        &["sync", "s3://bkt/p/", &rel, "--delete"],
+        CONFIG,
+        Box::new(handler),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let mut lines: Vec<&str> = r.stdout.lines().collect();
+    lines.sort();
+    // Same size: only a local file newer than the object is replaced
+    // (awscli's default download rule).
+    assert_eq!(
+        lines,
+        vec![
+            format!("delete: {rel}/stale.txt"),
+            format!("download: s3://bkt/p/new.txt to {rel}/new.txt"),
+            format!("download: s3://bkt/p/newer.txt to {rel}/newer.txt"),
+        ]
+    );
+    assert!(!dir.join("stale.txt").exists());
+    // Downloads take the object's LastModified as their mtime.
+    assert_eq!(mtime(&dir.join("new.txt")), T0);
+    assert_eq!(mtime(&dir.join("newer.txt")), T0);
+    assert_eq!(std::fs::read(dir.join("older.txt")).unwrap(), b"abcd");
+
+    // --exact-timestamps also replaces the older local file.
+    let r = run_s3(
+        &[
+            "sync",
+            "s3://bkt/p/",
+            &rel,
+            "--exact-timestamps",
+            "--dryrun",
+        ],
+        CONFIG,
+        Box::new(handler),
+    )
+    .unwrap();
+    assert_eq!(
+        r.stdout,
+        format!("(dryrun) download: s3://bkt/p/older.txt to {rel}/older.txt\n")
+    );
+}
+
+#[test]
+fn mv_removes_sources_and_website() {
+    let (dir, rel) = scratch("mv");
+    std::fs::write(dir.join("a.txt"), b"a").unwrap();
+    let a = format!("{rel}/a.txt");
+    let Some(r) = run_s3(&["mv", &a, "s3://bkt/a.txt"], CONFIG, Box::new(|_| ok(""))) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, format!("move: {rel}/a.txt to s3://bkt/a.txt\n"));
+    assert!(!dir.join("a.txt").exists());
+
+    let r = run_s3(
+        &["mv", "s3://src/k", "s3://dst/k"],
+        CONFIG,
+        Box::new(|req| match req.method.as_str() {
+            "HEAD" => Response {
+                status: 200,
+                headers: vec![("Content-Length".into(), "1".into())],
+                body: vec![],
+            },
+            "DELETE" => status(204, ""),
+            _ => ok("<CopyObjectResult/>"),
+        }),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "move: s3://src/k to s3://dst/k\n");
+    let last = r.requests.last().unwrap();
+    assert_eq!(
+        (last.method.as_str(), last.host.as_str(), last.path.as_str()),
+        ("DELETE", "src.s3.us-east-1.amazonaws.com", "/k")
+    );
+
+    // A failed copy keeps the source.
+    let r = run_s3(
+        &["mv", "s3://src/k", "s3://dst/k"],
+        CONFIG,
+        Box::new(|req| match req.method.as_str() {
+            "HEAD" => Response {
+                status: 200,
+                headers: vec![("Content-Length".into(), "1".into())],
+                body: vec![],
+            },
+            _ => status(
+                403,
+                "<Error><Code>AccessDenied</Code><Message>no</Message></Error>",
+            ),
+        }),
+    )
+    .unwrap();
+    assert_eq!(r.code, 1);
+    assert!(r.requests.iter().all(|q| q.method != "DELETE"));
+
+    let r = run_s3(
+        &["mv", "s3://b/k", "s3://b/k"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(
+        r.stderr.contains("Cannot mv a file onto itself"),
+        "{}",
+        r.stderr
+    );
+
+    let r = run_s3(
+        &[
+            "website",
+            "s3://site/",
+            "--index-document",
+            "index.html",
+            "--error-document",
+            "error.html",
+        ],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let req = &r.requests[0];
+    assert_eq!(req.method, "PUT");
+    assert!(req.query.iter().any(|(k, _)| k == "website"));
+    let body = String::from_utf8(req.body.clone()).unwrap();
+    assert!(body.contains("<IndexDocument><Suffix>index.html</Suffix></IndexDocument><ErrorDocument><Key>error.html</Key></ErrorDocument>"), "{body}");
+}
+
+#[test]
+fn keys_mapping_to_one_local_file_are_downloaded_once() {
+    let (dir, rel) = scratch("collide");
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::write(dir.join("a/b.txt"), b"old").unwrap();
+    let list = r#"<ListBucketResult>
+<Contents><Key>p/a/b.txt</Key><Size>3</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/a//b.txt</Key><Size>5</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+</ListBucketResult>"#;
+    let handler = move |req: &Request| match req.method.as_str() {
+        "GET" if query(req, "list-type").is_some() => ok(list),
+        "GET" => ok("new"),
+        "DELETE" => status(204, ""),
+        _ => ok(""),
+    };
+    // mv: only the first key is moved; the other source is kept.
+    let Some(r) = run_s3(
+        &["mv", "s3://bkt/p/", &format!("{rel}/mv"), "--recursive"],
+        CONFIG,
+        Box::new(handler),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr.contains(
+            "Skipping file a//b.txt. Another object is downloaded to the same local file."
+        ),
+        "{}",
+        r.stderr
+    );
+    let deletes: Vec<&str> = r
+        .requests
+        .iter()
+        .filter(|q| q.method == "DELETE")
+        .map(|q| q.path.as_str())
+        .collect();
+    assert_eq!(deletes, vec!["/p/a/b.txt"]);
+
+    // sync --delete: the local file matching a//b.txt is neither deleted nor
+    // downloaded twice.
+    std::fs::write(dir.join("a/b.txt"), b"old").unwrap();
+    let r = run_s3(
+        &["sync", "s3://bkt/p/", &rel, "--delete", "--exclude", "mv/*"],
+        CONFIG,
+        Box::new(handler),
+    )
+    .unwrap();
+    assert!(!r.stdout.contains("delete:"), "{}", r.stdout);
+    // The first key is synced (the local file is newer, awscli's rule);
+    // the second is skipped rather than written to the same file.
+    assert_eq!(r.stdout.matches("download:").count(), 1, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("download: s3://bkt/p/a/b.txt"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stderr.contains("Skipping file a//b.txt."), "{}", r.stderr);
+    assert!(dir.join("a/b.txt").exists());
+}

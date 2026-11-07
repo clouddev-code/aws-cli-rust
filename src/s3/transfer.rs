@@ -10,6 +10,7 @@
 
 use crate::client::{ChecksumWhen, Client, ClientError};
 use crate::value::{Map, Value};
+use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -63,13 +64,20 @@ pub enum Transfer {
         size: u64,
         /// Extra request parameters (ACL, StorageClass, ContentType, ...).
         extra: Map,
+        /// `mv`: remove the local file afterwards.
+        delete_source: bool,
     },
     Download {
         bucket: String,
         key: String,
         /// Known from a listing; otherwise a HeadObject finds it.
         size: Option<u64>,
+        /// Set as the file's modification time (`set_file_utime`); taken
+        /// from the response when not known from a listing.
+        last_modified: Option<DateTime<Utc>>,
         path: PathBuf,
+        /// `mv`: delete the object afterwards.
+        delete_source: bool,
     },
     Copy {
         src_bucket: String,
@@ -78,10 +86,16 @@ pub enum Transfer {
         bucket: String,
         key: String,
         extra: Map,
+        /// `mv`: delete the source object afterwards.
+        delete_source: bool,
     },
     Delete {
         bucket: String,
         key: String,
+    },
+    /// `sync --delete` towards a local directory.
+    DeleteLocal {
+        path: PathBuf,
     },
 }
 
@@ -124,6 +138,8 @@ struct Multipart {
     temp: Option<PathBuf>,
     part_size: u64,
     size: u64,
+    /// Download: modification time for the finished file.
+    last_modified: Option<DateTime<Utc>>,
     parts: Mutex<Vec<Option<Value>>>,
     remaining: AtomicUsize,
     error: Mutex<Option<String>>,
@@ -228,17 +244,26 @@ impl Engine<'_, '_> {
 
     /// A GetObject whose body may be at most `expected` bytes (plus slack
     /// for an object that grew since it was listed).
-    fn get(&self, params: Map, expected: u64, log: &mut Vec<u8>) -> Result<Vec<u8>, String> {
+    fn get(
+        &self,
+        params: Map,
+        expected: u64,
+        log: &mut Vec<u8>,
+    ) -> Result<(Vec<u8>, Option<DateTime<Utc>>), String> {
         let mut sink = std::io::sink();
         let log: &mut dyn Write = if self.debug { log } else { &mut sink };
         let resp = self
             .client
             .call_with_limit("GetObject", &Value::Map(params), expected + GET_SLACK, log)
             .map_err(|e| error_text(&e, "GetObject"))?;
-        Ok(match resp.get("Body") {
+        let body = match resp.get("Body") {
             Some(Value::Bytes(b)) => b.clone(),
             _ => Vec::new(),
-        })
+        };
+        let last_modified = resp
+            .get("LastModified")
+            .and_then(crate::timestamp::from_value);
+        Ok((body, last_modified))
     }
 
     fn checksums(&self) -> bool {
@@ -250,7 +275,10 @@ impl Engine<'_, '_> {
         match job {
             Job::Start(i) => match self.start(i, &mut log) {
                 Ok(Started::Done) => {
-                    let _ = tx.send(Outcome::Done(i));
+                    let _ = tx.send(match self.after_success(i, &mut log) {
+                        Ok(()) => Outcome::Done(i),
+                        Err(e) => Outcome::Failed(i, e),
+                    });
                 }
                 Ok(Started::Split) => {}
                 Err(e) => {
@@ -264,7 +292,10 @@ impl Engine<'_, '_> {
                     mp.error.lock().unwrap().get_or_insert(e);
                 }
                 if mp.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-                    let outcome = match self.finish_multipart(&mp, &mut log) {
+                    let outcome = match self
+                        .finish_multipart(&mp, &mut log)
+                        .and_then(|()| self.after_success(mp.transfer, &mut log))
+                    {
                         Ok(()) => Outcome::Done(mp.transfer),
                         Err(e) => Outcome::Failed(mp.transfer, e),
                     };
@@ -286,6 +317,7 @@ impl Engine<'_, '_> {
                 key,
                 size,
                 extra,
+                ..
             } => {
                 let mut params = extra.clone();
                 params.insert("Bucket".into(), s(bucket));
@@ -305,25 +337,28 @@ impl Engine<'_, '_> {
                     .and_then(Value::as_str)
                     .ok_or("CreateMultipartUpload returned no UploadId")?
                     .to_string();
-                self.split(i, upload_id, None, *size);
+                self.split(i, upload_id, None, *size, None);
                 Ok(Started::Split)
             }
             Transfer::Download {
                 bucket,
                 key,
                 size,
+                last_modified,
                 path,
+                ..
             } => {
-                let size = match size {
-                    Some(s) => *s,
-                    None => self.head_size(bucket, key, log)?,
+                let (size, last_modified) = match size {
+                    Some(s) => (*s, *last_modified),
+                    None => self.head(bucket, key, log)?,
                 };
                 if size < self.config.multipart_threshold {
                     let mut params = Map::new();
                     params.insert("Bucket".into(), s(bucket));
                     params.insert("Key".into(), s(key));
-                    let body = self.get(params, size, log)?;
+                    let (body, from_response) = self.get(params, size, log)?;
                     write_new_file(path, &body)?;
+                    set_mtime(path, last_modified.or(from_response))?;
                     return Ok(Started::Done);
                 }
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -331,7 +366,7 @@ impl Engine<'_, '_> {
                 }
                 let (temp, file) = create_temp(path)?;
                 file.set_len(size).map_err(|e| io_error(e, &temp))?;
-                self.split(i, String::new(), Some(temp), size);
+                self.split(i, String::new(), Some(temp), size, last_modified);
                 Ok(Started::Split)
             }
             Transfer::Copy {
@@ -341,10 +376,11 @@ impl Engine<'_, '_> {
                 bucket,
                 key,
                 extra,
+                ..
             } => {
                 let size = match size {
                     Some(s) => *s,
-                    None => self.head_size(src_bucket, src_key, log)?,
+                    None => self.head(src_bucket, src_key, log)?.0,
                 };
                 let mut params = extra.clone();
                 params.insert("Bucket".into(), s(bucket));
@@ -365,31 +401,81 @@ impl Engine<'_, '_> {
                     .and_then(Value::as_str)
                     .ok_or("CreateMultipartUpload returned no UploadId")?
                     .to_string();
-                self.split(i, upload_id, None, size);
+                self.split(i, upload_id, None, size, None);
                 Ok(Started::Split)
             }
             Transfer::Delete { bucket, key } => {
-                let mut params = Map::new();
-                params.insert("Bucket".into(), s(bucket));
-                params.insert("Key".into(), s(key));
-                self.call("DeleteObject", params, log)?;
+                self.delete_object(bucket, key, log)?;
+                Ok(Started::Done)
+            }
+            Transfer::DeleteLocal { path } => {
+                std::fs::remove_file(path).map_err(|e| io_error(e, path))?;
                 Ok(Started::Done)
             }
         }
     }
 
-    fn head_size(&self, bucket: &str, key: &str, log: &mut Vec<u8>) -> Result<u64, String> {
+    /// Size and LastModified of an object (HeadObject).
+    fn head(
+        &self,
+        bucket: &str,
+        key: &str,
+        log: &mut Vec<u8>,
+    ) -> Result<(u64, Option<DateTime<Utc>>), String> {
         let mut params = Map::new();
         params.insert("Bucket".into(), s(bucket));
         params.insert("Key".into(), s(key));
         let head = self.call("HeadObject", params, log)?;
-        Ok(match head.get("ContentLength") {
+        let size = match head.get("ContentLength") {
             Some(Value::Int(n)) => (*n).max(0) as u64,
             _ => 0,
-        })
+        };
+        let last_modified = head
+            .get("LastModified")
+            .and_then(crate::timestamp::from_value);
+        Ok((size, last_modified))
     }
 
-    fn split(&self, i: usize, upload_id: String, temp: Option<PathBuf>, size: u64) {
+    fn delete_object(&self, bucket: &str, key: &str, log: &mut Vec<u8>) -> Result<(), String> {
+        let mut params = Map::new();
+        params.insert("Bucket".into(), s(bucket));
+        params.insert("Key".into(), s(key));
+        self.call("DeleteObject", params, log).map(|_| ())
+    }
+
+    /// `mv`: remove the source once the transfer succeeded
+    /// (`DeleteSourceFileSubscriber` / `DeleteSourceObjectSubscriber`).
+    fn after_success(&self, i: usize, log: &mut Vec<u8>) -> Result<(), String> {
+        match &self.transfers[i] {
+            Transfer::Upload {
+                path,
+                delete_source: true,
+                ..
+            } => std::fs::remove_file(path).map_err(|e| io_error(e, path)),
+            Transfer::Download {
+                bucket,
+                key,
+                delete_source: true,
+                ..
+            } => self.delete_object(bucket, key, log),
+            Transfer::Copy {
+                src_bucket,
+                src_key,
+                delete_source: true,
+                ..
+            } => self.delete_object(src_bucket, src_key, log),
+            _ => Ok(()),
+        }
+    }
+
+    fn split(
+        &self,
+        i: usize,
+        upload_id: String,
+        temp: Option<PathBuf>,
+        size: u64,
+        last_modified: Option<DateTime<Utc>>,
+    ) {
         let part_size = self.config.part_size(size);
         let count = size.div_ceil(part_size).max(1);
         let mp = Arc::new(Multipart {
@@ -398,6 +484,7 @@ impl Engine<'_, '_> {
             temp,
             part_size,
             size,
+            last_modified,
             parts: Mutex::new(vec![None; count as usize]),
             remaining: AtomicUsize::new(count as usize),
             error: Mutex::new(None),
@@ -488,7 +575,7 @@ impl Engine<'_, '_> {
                     "Range".into(),
                     s(&format!("bytes={start}-{}", start + len - 1)),
                 );
-                let body = self.get(params, len, log)?;
+                let (body, _) = self.get(params, len, log)?;
                 if body.len() as u64 != len {
                     return Err(format!(
                         "expected {len} bytes for range starting at {start}, got {}",
@@ -505,7 +592,7 @@ impl Engine<'_, '_> {
                     })
                     .map_err(|e| io_error(e, temp))?;
             }
-            Transfer::Delete { .. } => {}
+            Transfer::Delete { .. } | Transfer::DeleteLocal { .. } => {}
         }
         Ok(())
     }
@@ -520,7 +607,8 @@ impl Engine<'_, '_> {
                     let _ = std::fs::remove_file(temp);
                     return Err(e);
                 }
-                std::fs::rename(temp, path).map_err(|e| io_error(e, path))
+                std::fs::rename(temp, path).map_err(|e| io_error(e, path))?;
+                set_mtime(path, mp.last_modified)
             }
             Transfer::Upload { bucket, key, .. } | Transfer::Copy { bucket, key, .. } => {
                 let mut params = Map::new();
@@ -543,9 +631,23 @@ impl Engine<'_, '_> {
                         let _ = self.call("AbortMultipartUpload", params.clone(), &mut Vec::new());
                     })
             }
-            Transfer::Delete { .. } => Ok(()),
+            Transfer::Delete { .. } | Transfer::DeleteLocal { .. } => Ok(()),
         }
     }
+}
+
+/// Set a downloaded file's modification time to the object's LastModified,
+/// which `sync` compares later.
+fn set_mtime(path: &std::path::Path, t: Option<DateTime<Utc>>) -> Result<(), String> {
+    let Some(t) = t else {
+        return Ok(());
+    };
+    let time = std::time::SystemTime::from(t);
+    File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(time))
+        .map_err(|e| io_error(e, path))
 }
 
 /// Write a whole file through a temporary name.
