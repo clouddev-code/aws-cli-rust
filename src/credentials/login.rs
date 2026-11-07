@@ -230,7 +230,6 @@ pub fn generate_key(ctx: &Context) -> SigningKey {
 /// key, as awscrt's `ECExportFormat.SEC1` does; awscrt cannot load a key
 /// without the curve OID, so the official CLI could not reuse the cache.
 pub fn key_to_pem(key: &SigningKey) -> String {
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
     // ECPrivateKey ::= SEQUENCE { version 1, privateKey OCTET STRING,
     //   [0] parameters (OID 1.2.840.10045.3.1.7), [1] publicKey BIT STRING }
     let private = key.to_bytes();
