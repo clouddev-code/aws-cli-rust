@@ -1,0 +1,135 @@
+# Follows aws-cli releases: when a newer 2.x.y tag exists, moves upstream.lock
+# to it (which changes the embedded models and examples), runs the tests and
+# opens a pull request with a summary of the model changes and the upstream
+# CHANGELOG. A failing test run opens a draft pull request with the log.
+#
+# Requires "Allow GitHub Actions to create and approve pull requests"
+# (Settings > Actions > General). Pull requests opened with GITHUB_TOKEN do
+# not trigger other workflows, so oss-scan does not run on them by itself.
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "0 0 * * 1" # Mondays 09:00 JST
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "aws-cli release tag (default: the latest 2.x.y)"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide the target release
+        id: target
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          current=$(sed -n 's/^tag *= *//p' upstream.lock)
+          tag=${INPUT_TAG:-$(scripts/upstream.sh latest)}
+          if ! [[ "$tag" =~ ^2\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not an aws-cli 2.x.y release tag: $tag"
+            exit 1
+          fi
+          branch="upstream/aws-cli-$tag"
+          skip=false
+          if [ "$tag" = "$current" ]; then
+            echo "Already at aws-cli $tag."
+            skip=true
+          elif git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "Branch $branch already exists; not opening another pull request."
+            skip=true
+          fi
+          {
+            echo "tag=$tag"
+            echo "branch=$branch"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.target.outputs.skip == 'false'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: actions/cache@v4
+        if: steps.target.outputs.skip == 'false'
+        with:
+          path: |
+            .cargo-home/registry
+            .cargo-home/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Update to the release and run the tests
+        id: test
+        if: steps.target.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          scripts/upstream.sh update "$TAG"
+          set +e
+          make test > target/test.log 2>&1
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          tail -n 40 target/test.log
+
+      - name: Open a pull request
+        if: steps.target.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.target.outputs.tag }}
+          BRANCH: ${{ steps.target.outputs.branch }}
+          STATUS: ${{ steps.test.outputs.status }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add upstream.lock
+          git commit -m "Update aws-cli to $TAG"
+          git push origin "$BRANCH"
+          {
+            if [ "$STATUS" != "0" ]; then
+              echo "> [!WARNING]"
+              echo "> \`make test\` failed with this release. See the log at the end."
+              echo
+            fi
+            cat target/upstream-summary.md
+            echo
+            echo "Models, paginators, waiters and examples are embedded at build time,"
+            echo "so this pull request only moves \`upstream.lock\`. CLI logic changes in"
+            echo "the CHANGELOG (\`enhancement\`, \`feature\`, \`bugfix\` entries) are not"
+            echo "picked up automatically. Run \`make fetch-upstream\` after merging."
+            if [ "$STATUS" != "0" ]; then
+              echo
+              echo "### Test log (last 80 lines)"
+              echo
+              echo '```'
+              tail -n 80 target/test.log | sed 's/```/` ` `/g'
+              echo '```'
+            fi
+          } > target/pr-body.md
+          # GitHub limits a pull request body to 65,536 characters.
+          head -c 60000 target/pr-body.md > target/pr-body-trimmed.md
+          draft=()
+          if [ "$STATUS" != "0" ]; then
+            draft=(--draft)
+          fi
+          gh pr create --base main --head "$BRANCH" \
+            --title "Update aws-cli to $TAG" \
+            --body-file target/pr-body-trimmed.md "${draft[@]}"
+
+      - name: Fail when the tests failed
+        if: steps.target.outputs.skip == 'false' && steps.test.outputs.status != '0'
+        run: exit 1

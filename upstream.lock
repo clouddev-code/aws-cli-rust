@@ -1,0 +1,6 @@
+# The aws-cli release that the embedded models, the examples and the
+# reference checkout (reference/aws-cli) come from.
+#   make fetch-upstream             check out this release
+#   make update-upstream [TAG=...]  move to the latest (or given) release
+tag = 2.39.6
+commit = 557c48bf358ce95d6eea901d6f39a5c9caca9e71

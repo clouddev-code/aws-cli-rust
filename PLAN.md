@@ -167,3 +167,5 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
   ```
 - ureq は `gzip` 機能を外し、`Accept-Encoding: identity` を送る (botocore = http.client と同じ)。自動解凍されると DynamoDB の `x-amz-crc32` やフレキシブルチェックサムの照合が本文と合わなくなるため。
 - `assets/cli.json` は aws-cli の `awscli/data/cli.json` (グローバル引数の説明) の複製。
+- 本家への追従: `upstream.lock` に aws-cli のリリースタグとコミットを記録する。`scripts/upstream.sh` (`fetch` / `latest` / `update`) と `make fetch-upstream` / `make update-upstream`。`update` はサービス・オペレーションの増減と CHANGELOG の該当範囲を `target/upstream-summary.md` に書く。build.rs は lock のタグを `--version` に埋め込み、手元の参照が lock と違えば警告する。`.github/workflows/upstream-sync.yml` が週 1 回これを実行して PR を作る (テスト失敗時は下書き PR)。自動で取り込まれるのはモデル・paginator・waiter・examples まで。手で移植した表 (argrename など) とロジックの変更は対象外。
+

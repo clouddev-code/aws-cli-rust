@@ -27,12 +27,25 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=AWSR_EMBED_DATA_DIR");
     println!("cargo:rerun-if-env-changed=AWSR_EMBED_LEVEL");
+    println!("cargo:rerun-if-changed=upstream.lock");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let data_dir = std::env::var_os("AWSR_EMBED_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest.join("reference/aws-cli/awscli/botocore/data"));
     let enabled = std::env::var_os("CARGO_FEATURE_EMBED_DATA").is_some();
+    let upstream = upstream_tag(&manifest);
+    println!(
+        "cargo:rustc-env=AWSR_UPSTREAM_TAG={}",
+        upstream.as_deref().unwrap_or("unknown")
+    );
+    if let (Some(lock), Some(found)) = (&upstream, reference_version(&data_dir))
+        && *lock != found
+    {
+        println!(
+            "cargo:warning=reference data is aws-cli {found} but upstream.lock says {lock}; run `make fetch-upstream`"
+        );
+    }
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     if enabled && data_dir.join("partitions.json").is_file() {
@@ -77,6 +90,23 @@ fn main() {
     index.push_str("];\n");
     fs::write(out.join("data.bin"), blob).unwrap();
     fs::write(out.join("data_index.rs"), index).unwrap();
+}
+
+/// `tag = ...` from upstream.lock.
+fn upstream_tag(manifest: &Path) -> Option<String> {
+    let lock = fs::read_to_string(manifest.join("upstream.lock")).ok()?;
+    lock.lines()
+        .find_map(|l| l.strip_prefix("tag"))
+        .and_then(|rest| rest.trim_start().strip_prefix('='))
+        .map(|v| v.trim().to_string())
+}
+
+/// `__version__` of the awscli checkout the data directory belongs to.
+fn reference_version(data_dir: &Path) -> Option<String> {
+    let init = data_dir.parent()?.parent()?.join("__init__.py");
+    let text = fs::read_to_string(init).ok()?;
+    let line = text.lines().find(|l| l.starts_with("__version__"))?;
+    Some(line.split(['\'', '"']).nth(1)?.to_string())
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
