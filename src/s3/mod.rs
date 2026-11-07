@@ -1095,15 +1095,28 @@ impl S3<'_, '_> {
                 };
                 for o in sources {
                     let rel = o.key[prefix.len()..].to_string();
-                    let wanted = match dests.remove(&rel) {
+                    // Compare against the local file the key really maps
+                    // to (`a//b` is `a/b`).
+                    let Some(path) = self.download_path(&plan, &local, &rel, &o.key) else {
+                        continue;
+                    };
+                    let local_rel = path
+                        .strip_prefix(&local)
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_default();
+                    let wanted = match dests.remove(&local_rel) {
                         None => true,
                         Some(d) => self.should_sync(o.size, o.last_modified, d.size, d.mtime, true),
                     };
                     if wanted {
                         self.plan_download(&mut plan, &cwd, &local, &rel, &bucket, o, false);
+                    } else {
+                        plan.download_paths.insert(path);
                     }
                 }
                 if self.args.delete {
+                    // Never delete a file that is (or stays) a download target.
+                    dests.retain(|_, d| !plan.download_paths.contains(&d.path));
                     for (_, d) in dests {
                         plan.push(
                             Shown {
@@ -1272,8 +1285,36 @@ impl S3<'_, '_> {
         Ok(())
     }
 
-    /// A download of an object listed below a prefix, unless it is a
-    /// directory marker or would leave the destination directory.
+    /// The local file an object below a prefix is downloaded to, or `None`
+    /// (with a warning) for directory markers, keys that would leave the
+    /// destination directory and keys that map to an already planned file.
+    fn download_path(
+        &mut self,
+        plan: &Plan,
+        dest_dir: &Path,
+        rel: &str,
+        key: &str,
+    ) -> Option<PathBuf> {
+        if key.ends_with('/') {
+            return None;
+        }
+        let Some(path) = local_path_for(dest_dir, rel) else {
+            self.warn(format!(
+                "warning: Skipping file {rel}. File references a parent directory."
+            ));
+            return None;
+        };
+        if plan.download_paths.contains(&path) {
+            self.warn(format!(
+                "warning: Skipping file {rel}. Another object is downloaded to the same local file."
+            ));
+            return None;
+        }
+        Some(path)
+    }
+
+    /// A download of an object listed below a prefix (see
+    /// [`S3::download_path`]).
     #[allow(clippy::too_many_arguments)]
     fn plan_download(
         &mut self,
@@ -1285,15 +1326,10 @@ impl S3<'_, '_> {
         o: Obj,
         is_move: bool,
     ) {
-        if o.key.ends_with('/') {
-            return;
-        }
-        let Some(path) = local_path_for(dest_dir, rel) else {
-            self.warn(format!(
-                "warning: Skipping file {rel}. File references a parent directory."
-            ));
+        let Some(path) = self.download_path(plan, dest_dir, rel, &o.key) else {
             return;
         };
+        plan.download_paths.insert(path.clone());
         plan.push(
             Shown {
                 kind: kind("download", is_move),
@@ -1350,6 +1386,10 @@ enum Direction {
 struct Plan {
     transfers: Vec<Transfer>,
     shown: Vec<Shown>,
+    /// Local paths already being downloaded to: keys such as `a//b` and
+    /// `a/b` map to the same file, and only the first one is transferred
+    /// (so `mv` never deletes the source of a file that was overwritten).
+    download_paths: std::collections::HashSet<PathBuf>,
 }
 
 impl Plan {

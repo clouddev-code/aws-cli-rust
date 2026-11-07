@@ -910,3 +910,64 @@ fn mv_removes_sources_and_website() {
     let body = String::from_utf8(req.body.clone()).unwrap();
     assert!(body.contains("<IndexDocument><Suffix>index.html</Suffix></IndexDocument><ErrorDocument><Key>error.html</Key></ErrorDocument>"), "{body}");
 }
+
+#[test]
+fn keys_mapping_to_one_local_file_are_downloaded_once() {
+    let (dir, rel) = scratch("collide");
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::write(dir.join("a/b.txt"), b"old").unwrap();
+    let list = r#"<ListBucketResult>
+<Contents><Key>p/a/b.txt</Key><Size>3</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+<Contents><Key>p/a//b.txt</Key><Size>5</Size><LastModified>2015-08-30T12:00:00.000Z</LastModified></Contents>
+</ListBucketResult>"#;
+    let handler = move |req: &Request| match req.method.as_str() {
+        "GET" if query(req, "list-type").is_some() => ok(list),
+        "GET" => ok("new"),
+        "DELETE" => status(204, ""),
+        _ => ok(""),
+    };
+    // mv: only the first key is moved; the other source is kept.
+    let Some(r) = run_s3(
+        &["mv", "s3://bkt/p/", &format!("{rel}/mv"), "--recursive"],
+        CONFIG,
+        Box::new(handler),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr.contains(
+            "Skipping file a//b.txt. Another object is downloaded to the same local file."
+        ),
+        "{}",
+        r.stderr
+    );
+    let deletes: Vec<&str> = r
+        .requests
+        .iter()
+        .filter(|q| q.method == "DELETE")
+        .map(|q| q.path.as_str())
+        .collect();
+    assert_eq!(deletes, vec!["/p/a/b.txt"]);
+
+    // sync --delete: the local file matching a//b.txt is neither deleted nor
+    // downloaded twice.
+    std::fs::write(dir.join("a/b.txt"), b"old").unwrap();
+    let r = run_s3(
+        &["sync", "s3://bkt/p/", &rel, "--delete", "--exclude", "mv/*"],
+        CONFIG,
+        Box::new(handler),
+    )
+    .unwrap();
+    assert!(!r.stdout.contains("delete:"), "{}", r.stdout);
+    // The first key is synced (the local file is newer, awscli's rule);
+    // the second is skipped rather than written to the same file.
+    assert_eq!(r.stdout.matches("download:").count(), 1, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("download: s3://bkt/p/a/b.txt"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stderr.contains("Skipping file a//b.txt."), "{}", r.stderr);
+    assert!(dir.join("a/b.txt").exists());
+}
