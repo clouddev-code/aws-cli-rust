@@ -6,6 +6,7 @@ pub mod shorthand;
 
 use crate::model::Shape;
 use crate::naming::cli_name;
+use crate::paginate::PaginatorConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageError(pub String);
@@ -131,11 +132,13 @@ pub fn split_globals(argv: &[String]) -> Result<(Globals, Vec<String>), UsageErr
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
-    /// `--flag` / `--no-flag`.
-    Boolean,
+    /// `--flag` stores `true`; its `--no-flag` twin stores `false`.
+    Boolean(bool),
     /// Every following word up to the next option.
     List,
     Single,
+    /// argparse `nargs='?'`: an optional value (`--generate-cli-skeleton`).
+    OptionalValue,
     /// A bare word (argparse positional), e.g. `outfile`.
     Positional,
 }
@@ -148,6 +151,8 @@ pub enum ArgTarget {
     PageSize,
     MaxItems,
     CliInputJson,
+    CliInputYaml,
+    GenerateCliSkeleton,
     /// `outfile` for operations with a streaming blob output
     /// (`StreamingOutputArgument`).
     Outfile,
@@ -159,62 +164,130 @@ pub struct ArgDef {
     pub target: ArgTarget,
     pub kind: ArgKind,
     pub required: bool,
+    /// `_UNDOCUMENTED`: accepted but left out of help and completion.
+    pub hidden: bool,
+    /// `_DOCUMENT_AS_REQUIRED`: optional because of a hidden alias, but
+    /// documented as required.
+    pub document_required: bool,
+}
+
+impl ArgDef {
+    pub fn new(cli_name: impl Into<String>, target: ArgTarget, kind: ArgKind) -> Self {
+        ArgDef {
+            cli_name: cli_name.into(),
+            target,
+            kind,
+            required: false,
+            hidden: false,
+            document_required: false,
+        }
+    }
+
+    /// Name without the leading `--`.
+    pub fn name(&self) -> &str {
+        self.cli_name.trim_start_matches("--")
+    }
+}
+
+/// Inputs to [`arg_table`] besides the input shape.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TableOptions<'a> {
+    pub paginator: Option<&'a PaginatorConfig>,
+    pub no_paginate: bool,
+    /// The operation has a streaming output (`outfile` positional). Such
+    /// operations get neither `--cli-input-*` nor `--generate-cli-skeleton`.
+    pub outfile: bool,
 }
 
 /// Build the argument table for an operation (`ServiceOperation.arg_table`
-/// plus awscli's `unify_paging_params`).
+/// plus the `cliinput`, `paginate`, `generatecliskeleton` and
+/// `streamingoutputarg` customizations), in awscli's order.
 ///
-/// For paginated operations `--starting-token`, `--page-size` and
-/// `--max-items` shadow members with the same CLI name. With `--no-paginate`
-/// the shadowed members come back, as in awscli.
-pub fn arg_table(input: Option<&Shape>, paginated: bool, no_paginate: bool) -> Vec<ArgDef> {
+/// For paginated operations the input tokens and limit key stay usable but
+/// are undocumented, and `--starting-token`, `--page-size` (only with a limit
+/// key) and `--max-items` shadow members with the same CLI name. With
+/// `--no-paginate` the shadowed members come back, as in awscli.
+pub fn arg_table(input: Option<&Shape>, opts: &TableOptions) -> Vec<ArgDef> {
     let mut table = Vec::new();
     if let Some(shape) = input {
         let required = shape.required();
+        let paging_members: Vec<&str> = opts
+            .paginator
+            .map(|p| {
+                p.input_tokens
+                    .iter()
+                    .chain(p.limit_key.iter())
+                    .map(String::as_str)
+                    .collect()
+            })
+            .unwrap_or_default();
         for (name, member) in shape.members() {
+            let flag = format!("--{}", cli_name(name));
+            let target = ArgTarget::Member(name.to_string());
             let kind = match member.type_name() {
-                "boolean" => ArgKind::Boolean,
+                "boolean" => ArgKind::Boolean(true),
                 "list" => ArgKind::List,
                 _ => ArgKind::Single,
             };
-            table.push(ArgDef {
-                cli_name: format!("--{}", cli_name(name)),
-                target: ArgTarget::Member(name.to_string()),
-                kind,
-                required: required.contains(&name) && !member.bool_trait("idempotencyToken"),
+            let mut def = ArgDef::new(flag.clone(), target.clone(), kind);
+            def.required = required.contains(&name) && !member.bool_trait("idempotencyToken");
+            def.hidden = paging_members.contains(&name);
+            let negative = (kind == ArgKind::Boolean(true)).then(|| ArgDef {
+                cli_name: format!("--no-{}", cli_name(name)),
+                kind: ArgKind::Boolean(false),
+                required: false,
+                ..def.clone()
             });
+            table.push(def);
+            table.extend(negative);
         }
     }
-    table.push(ArgDef {
-        cli_name: "--cli-input-json".into(),
-        target: ArgTarget::CliInputJson,
-        kind: ArgKind::Single,
-        required: false,
-    });
-    if paginated {
-        for (n, t) in [
-            ("--starting-token", ArgTarget::StartingToken),
-            ("--page-size", ArgTarget::PageSize),
-            ("--max-items", ArgTarget::MaxItems),
-        ] {
+    if opts.outfile {
+        let mut def = ArgDef::new("outfile", ArgTarget::Outfile, ArgKind::Positional);
+        def.required = true;
+        table.push(def);
+    } else {
+        table.push(ArgDef::new(
+            "--cli-input-json",
+            ArgTarget::CliInputJson,
+            ArgKind::Single,
+        ));
+        table.push(ArgDef::new(
+            "--cli-input-yaml",
+            ArgTarget::CliInputYaml,
+            ArgKind::Single,
+        ));
+    }
+    if let Some(p) = opts.paginator {
+        let mut paging = vec![("--starting-token", ArgTarget::StartingToken)];
+        if p.limit_key.is_some() {
+            paging.push(("--page-size", ArgTarget::PageSize));
+        }
+        paging.push(("--max-items", ArgTarget::MaxItems));
+        for (n, t) in paging {
             let shadowed = table.iter().position(|d| d.cli_name == n);
-            match (shadowed, no_paginate) {
+            match (shadowed, opts.no_paginate) {
                 (Some(_), true) => continue,
                 (Some(idx), false) => {
                     table.remove(idx);
                 }
                 (None, _) => {}
             }
-            table.push(ArgDef {
-                cli_name: n.into(),
-                target: t,
-                kind: ArgKind::Single,
-                required: false,
-            });
+            table.push(ArgDef::new(n, t, ArgKind::Single));
         }
+    }
+    if !opts.outfile {
+        table.push(ArgDef::new(
+            "--generate-cli-skeleton",
+            ArgTarget::GenerateCliSkeleton,
+            ArgKind::OptionalValue,
+        ));
     }
     table
 }
+
+/// `--generate-cli-skeleton` choices; a bare flag means `input`.
+pub const SKELETON_CHOICES: &[&str] = &["input", "output", "yaml-input"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArgValue {
@@ -248,26 +321,35 @@ pub fn parse_op_args(
             Some((f, v)) => (f.to_string(), Some(v.to_string())),
             None => (token.clone(), None),
         };
-        let negated = flag.strip_prefix("--no-").map(|f| format!("--{f}"));
-        let found = table
-            .iter()
-            .position(|d| d.cli_name == flag)
-            .map(|idx| (idx, false))
-            .or_else(|| {
-                negated.as_ref().and_then(|n| {
-                    table
-                        .iter()
-                        .position(|d| &d.cli_name == n && d.kind == ArgKind::Boolean)
-                        .map(|idx| (idx, true))
-                })
-            });
-        let Some((idx, is_negated)) = found else {
+        let Some(idx) = table.iter().position(|d| d.cli_name == flag) else {
             unknown.push(token.clone());
             continue;
         };
         let def = &table[idx];
         let value = match def.kind {
-            ArgKind::Boolean => ArgValue::Bool(!is_negated),
+            ArgKind::Boolean(v) => ArgValue::Bool(v),
+            ArgKind::OptionalValue => {
+                let v = inline.or_else(|| {
+                    let v = tokens.get(i).filter(|t| !is_option(t)).cloned();
+                    i += usize::from(v.is_some());
+                    v
+                });
+                let v = v.unwrap_or_else(|| SKELETON_CHOICES[0].to_string());
+                if def.target == ArgTarget::GenerateCliSkeleton
+                    && !SKELETON_CHOICES.contains(&v.as_str())
+                {
+                    return Err(UsageError(format!(
+                        "argument {}: Invalid choice: '{v}' (choose from {})",
+                        def.cli_name,
+                        SKELETON_CHOICES
+                            .iter()
+                            .map(|c| format!("'{c}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                ArgValue::Words(vec![v])
+            }
             ArgKind::Single | ArgKind::Positional => {
                 let v = match inline {
                     Some(v) => v,
@@ -303,7 +385,11 @@ pub fn parse_op_args(
                 ArgValue::Words(words)
             }
         };
-        out.retain(|(j, _)| *j != idx);
+        // `--flag` and `--no-flag` share a destination; the last one wins.
+        out.retain(|(j, _)| {
+            *j != idx
+                && !(table[*j].target == def.target && matches!(def.kind, ArgKind::Boolean(_)))
+        });
         out.push((idx, value));
     }
     if !unknown.is_empty() {
@@ -312,13 +398,17 @@ pub fn parse_op_args(
             unknown.join(", ")
         )));
     }
-    // With --cli-input-json the required members may come from the JSON
-    // document, so the caller re-checks after merging (awscli does the same by
-    // marking arguments optional).
-    if out
-        .iter()
-        .any(|(j, _)| table[*j].target == ArgTarget::CliInputJson)
-    {
+    // With `--cli-input-*` the required members may come from the document,
+    // so the caller re-checks after merging; `--generate-cli-skeleton` (but
+    // not `output`) needs none (`OverrideRequiredArgsArgument`).
+    let overrides_required = out.iter().any(|(j, v)| match &table[*j].target {
+        ArgTarget::CliInputJson | ArgTarget::CliInputYaml => true,
+        ArgTarget::GenerateCliSkeleton => {
+            !matches!(v, ArgValue::Words(w) if w.first().map(String::as_str) == Some("output"))
+        }
+        _ => false,
+    });
+    if overrides_required {
         return Ok(out);
     }
     let missing: Vec<&str> = table
@@ -363,34 +453,40 @@ mod tests {
 
     #[test]
     fn op_args() {
+        let mut ids = ArgDef::new("--ids", ArgTarget::Member("Ids".into()), ArgKind::List);
+        ids.required = true;
+        let dry = ArgTarget::Member("DryRun".into());
         let table = vec![
-            ArgDef {
-                cli_name: "--ids".into(),
-                target: ArgTarget::Member("Ids".into()),
-                kind: ArgKind::List,
-                required: true,
-            },
-            ArgDef {
-                cli_name: "--dry-run".into(),
-                target: ArgTarget::Member("DryRun".into()),
-                kind: ArgKind::Boolean,
-                required: false,
-            },
-            ArgDef {
-                cli_name: "--count".into(),
-                target: ArgTarget::Member("Count".into()),
-                kind: ArgKind::Single,
-                required: false,
-            },
+            ids,
+            ArgDef::new("--dry-run", dry.clone(), ArgKind::Boolean(true)),
+            ArgDef::new("--no-dry-run", dry, ArgKind::Boolean(false)),
+            ArgDef::new(
+                "--count",
+                ArgTarget::Member("Count".into()),
+                ArgKind::Single,
+            ),
+            ArgDef::new(
+                "--generate-cli-skeleton",
+                ArgTarget::GenerateCliSkeleton,
+                ArgKind::OptionalValue,
+            ),
         ];
         let parsed = parse_op_args(
-            &s(&["--ids", "a", "b", "--no-dry-run", "--count", "-1"]),
+            &s(&[
+                "--ids",
+                "a",
+                "b",
+                "--dry-run",
+                "--no-dry-run",
+                "--count",
+                "-1",
+            ]),
             &table,
         )
         .unwrap();
         assert_eq!(parsed[0], (0, ArgValue::Words(s(&["a", "b"]))));
-        assert_eq!(parsed[1], (1, ArgValue::Bool(false)));
-        assert_eq!(parsed[2], (2, ArgValue::Words(s(&["-1"]))));
+        assert_eq!(parsed[1], (2, ArgValue::Bool(false)));
+        assert_eq!(parsed[2], (3, ArgValue::Words(s(&["-1"]))));
         let err = parse_op_args(&s(&["--count", "1"]), &table).unwrap_err();
         assert_eq!(err.0, "the following arguments are required: --ids");
         assert!(
@@ -399,5 +495,11 @@ mod tests {
                 .0
                 .contains("Unknown options")
         );
+        // A bare --generate-cli-skeleton means `input` and lifts required
+        // arguments; `output` keeps them.
+        let parsed = parse_op_args(&s(&["--generate-cli-skeleton"]), &table).unwrap();
+        assert_eq!(parsed[0], (4, ArgValue::Words(s(&["input"]))));
+        assert!(parse_op_args(&s(&["--generate-cli-skeleton", "output"]), &table).is_err());
+        assert!(parse_op_args(&s(&["--generate-cli-skeleton", "bogus"]), &table).is_err());
     }
 }

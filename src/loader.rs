@@ -1,6 +1,8 @@
 //! Locating and loading botocore data files (botocore `loaders.py`).
 //!
-//! Layout: `<data>/<service>/<api-version>/{service-2,paginators-1,waiters-2,endpoint-rule-set-1}.json`
+//! Data comes from the models embedded at build time (see `build.rs`) or a
+//! botocore data directory laid out as
+//! `<data>/<service>/<api-version>/{service-2,paginators-1,waiters-2,endpoint-rule-set-1}.json`
 //! plus `<data>/partitions.json`.
 
 use crate::model::ServiceModel;
@@ -28,22 +30,73 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// The models and examples compressed into the binary by `build.rs`.
+#[cfg(feature = "embed-data")]
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/data_index.rs"));
+    pub static DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/data.bin"));
+
+    pub fn file(path: &str) -> Option<Vec<u8>> {
+        let i = FILES.binary_search_by(|(p, _, _)| (*p).cmp(path)).ok()?;
+        let (_, offset, len) = FILES[i];
+        zstd::stream::decode_all(&DATA[offset..offset + len]).ok()
+    }
+}
+
+#[cfg(not(feature = "embed-data"))]
+mod embedded {
+    pub static FILES: &[(&str, usize, usize)] = &[];
+
+    pub fn file(_path: &str) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// Where the data files come from.
+#[derive(Debug, Clone)]
+enum Source {
+    /// A botocore `data` directory (all API versions, extras merged on load).
+    Dir(PathBuf),
+    /// Embedded at build time: latest versions only, extras already merged,
+    /// paths `<service>/<file>`, `partitions.json`, `examples/...`.
+    Embedded,
+}
+
 #[derive(Debug, Clone)]
 pub struct Loader {
-    root: PathBuf,
+    source: Source,
 }
 
 impl Loader {
+    /// A loader for a botocore `data` directory.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Loader { root: root.into() }
+        Loader {
+            source: Source::Dir(root.into()),
+        }
     }
 
-    /// `AWSR_DATA_DIR`, then `data/` next to the executable, then the
-    /// reference checkout used during development.
+    /// The models embedded in the binary, if it was built with them.
+    pub fn embedded() -> Option<Self> {
+        (!embedded::FILES.is_empty()).then_some(Loader {
+            source: Source::Embedded,
+        })
+    }
+
+    /// `AWSR_DATA_DIR`, then the embedded models, then `data/` next to the
+    /// executable, then the reference checkout used during development.
     pub fn discover() -> Result<Self, LoadError> {
+        let is_data_dir = |p: &PathBuf| p.join("partitions.json").is_file();
+        if let Some(dir) = std::env::var_os("AWSR_DATA_DIR").map(PathBuf::from)
+            && is_data_dir(&dir)
+        {
+            return Ok(Loader::new(dir));
+        }
+        if let Some(l) = Self::embedded() {
+            return Ok(l);
+        }
         Self::candidates()
             .into_iter()
-            .find(|p| p.join("partitions.json").is_file())
+            .find(is_data_dir)
             .map(Loader::new)
             .ok_or_else(|| {
                 LoadError(
@@ -54,11 +107,9 @@ impl Loader {
             })
     }
 
-    pub fn candidates() -> Vec<PathBuf> {
+    /// Data directories searched when nothing is embedded.
+    fn candidates() -> Vec<PathBuf> {
         let mut out = Vec::new();
-        if let Some(p) = std::env::var_os("AWSR_DATA_DIR") {
-            out.push(PathBuf::from(p));
-        }
         if let Ok(exe) = std::env::current_exe()
             && let Some(dir) = exe.parent()
         {
@@ -70,20 +121,23 @@ impl Loader {
         out
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Model directory names, sorted.
     pub fn service_dirs(&self) -> Vec<String> {
-        let mut v: Vec<String> = fs::read_dir(&self.root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|name| !name.starts_with('.'))
-            .collect();
+        let mut v: Vec<String> = match &self.source {
+            Source::Dir(root) => fs::read_dir(root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| !name.starts_with('.'))
+                .collect(),
+            Source::Embedded => embedded::FILES
+                .iter()
+                .filter_map(|(p, _, _)| p.strip_suffix("/service-2.json"))
+                .map(str::to_string)
+                .collect(),
+        };
         v.sort();
         v
     }
@@ -97,6 +151,13 @@ impl Loader {
             .collect();
         v.sort();
         v
+    }
+
+    fn has_service(&self, dir: &str) -> bool {
+        match &self.source {
+            Source::Dir(root) => root.join(dir).is_dir(),
+            Source::Embedded => embedded::file(&format!("{dir}/service-2.json")).is_some(),
+        }
     }
 
     /// Map a CLI command name back to the model directory.
@@ -113,11 +174,11 @@ impl Loader {
         {
             return None;
         }
-        self.root.join(&dir).is_dir().then_some(dir)
+        self.has_service(&dir).then_some(dir)
     }
 
-    fn version_dir(&self, service: &str) -> Result<PathBuf, LoadError> {
-        let dir = self.root.join(service);
+    fn version_dir(root: &Path, service: &str) -> Result<PathBuf, LoadError> {
+        let dir = root.join(service);
         let mut versions: Vec<PathBuf> = fs::read_dir(&dir)
             .map_err(|e| LoadError(format!("unknown service {service}: {e}")))?
             .flatten()
@@ -131,16 +192,44 @@ impl Loader {
             .ok_or_else(|| LoadError(format!("no API version for {service}")))
     }
 
+    /// Load `<service>/<latest version>/<file>`, with the matching
+    /// `*.sdk-extras.json` merged in (`Loader.load_service_model` +
+    /// `ExtrasProcessor`).
     pub fn load_json(
         &self,
         service: &str,
         file: &str,
     ) -> Result<Option<serde_json::Value>, LoadError> {
-        let path = self.version_dir(service)?.join(file);
+        let root = match &self.source {
+            Source::Dir(root) => root,
+            Source::Embedded => {
+                let path = format!("{service}/{file}");
+                if !self.has_service(service) {
+                    return Err(LoadError(format!("unknown service {service}")));
+                }
+                return embedded::file(&path)
+                    .map(|bytes| {
+                        serde_json::from_slice(&bytes)
+                            .map_err(|e| LoadError(format!("{path}: {e}")))
+                    })
+                    .transpose();
+            }
+        };
+        let dir = Self::version_dir(root, service)?;
+        let path = dir.join(file);
         if !path.is_file() {
             return Ok(None);
         }
-        read_json(&path).map(Some)
+        let mut doc = read_json(&path)?;
+        if let Some(stem) = file.strip_suffix(".json") {
+            let extras = dir.join(format!("{stem}.sdk-extras.json"));
+            if extras.is_file()
+                && let Some(merge) = read_json(&extras)?.get("merge")
+            {
+                deep_merge(&mut doc, merge);
+            }
+        }
+        Ok(Some(doc))
     }
 
     pub fn service_model(&self, service: &str) -> Result<ServiceModel, LoadError> {
@@ -151,8 +240,32 @@ impl Loader {
         ServiceModel::from_json(service, raw).map_err(|e| LoadError(e.to_string()))
     }
 
+    /// An authored examples file (`awscli/examples/<command>/<sub...>.rst`),
+    /// looked up next to the botocore data directory.
+    pub fn example(&self, path: &[&str]) -> Option<String> {
+        match &self.source {
+            Source::Dir(root) => {
+                let mut file = root.parent()?.parent()?.join("examples");
+                for p in path {
+                    file.push(p);
+                }
+                file.set_extension("rst");
+                fs::read_to_string(file).ok()
+            }
+            Source::Embedded => embedded::file(&format!("examples/{}.rst", path.join("/")))
+                .and_then(|b| String::from_utf8(b).ok()),
+        }
+    }
+
     pub fn partitions(&self) -> Result<serde_json::Value, LoadError> {
-        read_json(&self.root.join("partitions.json"))
+        match &self.source {
+            Source::Dir(root) => read_json(&root.join("partitions.json")),
+            Source::Embedded => {
+                let bytes = embedded::file("partitions.json")
+                    .ok_or_else(|| LoadError("partitions.json not embedded".into()))?;
+                serde_json::from_slice(&bytes).map_err(|e| LoadError(e.to_string()))
+            }
+        }
     }
 }
 
@@ -187,6 +300,24 @@ pub fn customize_model(service: &str, raw: &mut serde_json::Value) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// botocore `utils.deep_merge`: objects merge recursively, anything else in
+/// `extra` replaces the base value.
+pub fn deep_merge(base: &mut serde_json::Value, extra: &serde_json::Value) {
+    let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) else {
+        return;
+    };
+    for (key, value) in extra {
+        match base.get_mut(key) {
+            Some(existing) if existing.is_object() && value.is_object() => {
+                deep_merge(existing, value)
+            }
+            _ => {
+                base.insert(key.clone(), value.clone());
+            }
         }
     }
 }

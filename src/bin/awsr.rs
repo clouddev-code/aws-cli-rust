@@ -97,6 +97,22 @@ fn open_browser(url: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// `determine_terminal_width`: the width of the terminal on stdout.
+fn terminal_width() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut ws = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+        // SAFETY: TIOCGWINSZ fills a winsize struct on success.
+        let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) };
+        if ok == 0 {
+            // SAFETY: initialized by the successful ioctl above.
+            let ws = unsafe { ws.assume_init() };
+            return (ws.ws_col > 0).then_some(ws.ws_col as usize);
+        }
+    }
+    None
+}
+
 fn timeout(args: &[String], flag: &str) -> Option<Duration> {
     let pos = args.iter().position(|a| a == flag)?;
     let secs: u64 = args.get(pos + 1)?.parse().ok()?;
@@ -104,8 +120,47 @@ fn timeout(args: &[String], flag: &str) -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
+/// Shell completion, like awscli's `aws_completer`: run as `awsr_completer`
+/// (a link to this binary) or `awsr __complete`. Reads the command line from
+/// `COMP_LINE` up to `COMP_POINT` and prints one candidate per line.
+///
+/// - bash: `complete -C awsr_completer awsr`
+/// - zsh: `autoload bashcompinit && bashcompinit && complete -C awsr_completer awsr`
+/// - fish: `complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_completer; end)'`
+fn complete() {
+    let Ok(line) = std::env::var("COMP_LINE") else {
+        eprintln!("awsr_completer: COMP_LINE is not set");
+        std::process::exit(1);
+    };
+    let point = std::env::var("COMP_POINT")
+        .ok()
+        .and_then(|p| p.parse::<usize>().ok())
+        .unwrap_or(line.len())
+        .min(line.len());
+    let mut end = point;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let Ok(loader) = driver::default_loader() else {
+        return;
+    };
+    let config = SharedConfig::load();
+    let mut out = std::io::stdout().lock();
+    for candidate in awsr::completion::complete(&loader, &config, &line[..end]) {
+        let _ = writeln!(out, "{candidate}");
+    }
+}
+
 fn main() {
+    let program = std::env::args().next().unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let as_completer = std::path::Path::new(&program)
+        .file_stem()
+        .is_some_and(|s| s == "awsr_completer");
+    if as_completer || args.first().map(String::as_str) == Some("__complete") {
+        complete();
+        return;
+    }
     let loader = match driver::default_loader() {
         Ok(l) => l,
         Err(e) => {
@@ -128,6 +183,7 @@ fn main() {
         sleep: Box::new(std::thread::sleep),
         open_browser: Box::new(open_browser),
         stdout_is_tty: std::io::stdout().is_terminal(),
+        terminal_width: terminal_width(),
         random: Box::new(awsr::oauth::os_random),
         callback: Box::new(awsr::oauth::LocalCallbackServer::bind),
     };

@@ -73,20 +73,8 @@ fn run_with(
 ) -> Option<Run> {
     let loader = common::loader_or_skip()?;
     let transport = FakeTransport::new(responses);
-    let ctx = Context {
-        loader,
-        config,
-        env: Box::new(move |k| env.get(k).cloned()),
-        transport: &transport,
-        now: Box::new(|| Utc.with_ymd_and_hms(2015, 8, 30, 12, 36, 0).unwrap()),
-        uuid: Box::new(|| "00000000-0000-4000-8000-000000000000".to_string()),
-        prompt: Box::new(|_| None),
-        sleep: Box::new(|_| {}),
-        open_browser: Box::new(|_| false),
-        stdout_is_tty: false,
-        random: Box::new(|n| vec![7; n]),
-        callback: Box::new(|_| Err("no callback in tests".into())),
-    };
+    let mut ctx = test_context(loader, &transport, env);
+    ctx.config = config;
     let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = driver::run(&ctx, &argv, &mut out, &mut err);
@@ -97,6 +85,28 @@ fn run_with(
         stderr: String::from_utf8(err).unwrap(),
         requests: transport.requests.take(),
     })
+}
+
+fn test_context<'a>(
+    loader: awsr::loader::Loader,
+    transport: &'a FakeTransport,
+    env: HashMap<String, String>,
+) -> Context<'a> {
+    Context {
+        loader,
+        config: SharedConfig::default(),
+        env: Box::new(move |k| env.get(k).cloned()),
+        transport,
+        now: Box::new(|| Utc.with_ymd_and_hms(2015, 8, 30, 12, 36, 0).unwrap()),
+        uuid: Box::new(|| "00000000-0000-4000-8000-000000000000".to_string()),
+        prompt: Box::new(|_| None),
+        sleep: Box::new(|_| {}),
+        open_browser: Box::new(|_| false),
+        stdout_is_tty: false,
+        terminal_width: None,
+        random: Box::new(|n| vec![7; n]),
+        callback: Box::new(|_| Err("no callback in tests".into())),
+    }
 }
 
 fn run(args: &[&str], responses: Vec<Response>) -> Option<Run> {
@@ -183,8 +193,8 @@ fn ec2_shorthand_filters_lists_and_text_output() {
 #[test]
 fn dynamodb_auto_pagination_json_protocol() {
     let pages = vec![
-        ok(r#"{"TableNames":["a","b"],"LastEvaluatedTableName":"b"}"#),
-        ok(r#"{"TableNames":["c"]}"#),
+        ok(r#"{"TableNames":["t-a","t-b"],"LastEvaluatedTableName":"t-b"}"#),
+        ok(r#"{"TableNames":["t-c"]}"#),
     ];
     let Some(r) = run(&["dynamodb", "list-tables", "--page-size", "2"], pages) else {
         return;
@@ -203,10 +213,13 @@ fn dynamodb_auto_pagination_json_protocol() {
     assert_eq!(body(first), r#"{"Limit":2}"#);
     assert_eq!(
         body(&r.requests[1]),
-        r#"{"Limit":2,"ExclusiveStartTableName":"b"}"#
+        r#"{"Limit":2,"ExclusiveStartTableName":"t-b"}"#
     );
     let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
-    assert_eq!(out, serde_json::json!({"TableNames": ["a", "b", "c"]}));
+    assert_eq!(
+        out,
+        serde_json::json!({"TableNames": ["t-a", "t-b", "t-c"]})
+    );
 }
 
 #[test]
@@ -817,16 +830,17 @@ fn help_and_version() {
     let Some(r) = run(&["help"], vec![]) else {
         return;
     };
-    assert!(r.stdout.contains("  s3api\n") && r.stdout.contains("  ec2\n"));
+    assert!(r.stdout.contains("       o s3api\n") && r.stdout.contains("       o ec2\n"));
     let Some(r) = run(&["sts", "help"], vec![]) else {
         return;
     };
-    assert!(r.stdout.contains("  get-caller-identity\n"));
+    assert!(r.stdout.contains("       o get-caller-identity\n"));
     let Some(r) = run(&["dynamodb", "describe-table", "help"], vec![]) else {
         return;
     };
     assert!(
-        r.stdout.contains("--table-name (string) (required)"),
+        r.stdout
+            .contains("       --table-name (string) [required]\n"),
         "{}",
         r.stdout
     );
@@ -873,7 +887,7 @@ fn eventbridge_global_endpoint_uses_sigv4a() {
         "--endpoint-id",
         "abc.xyz",
         "--entries",
-        "Source=app,DetailType=t,Detail={}",
+        "Source=app,DetailType=t,Detail=\"{}\"",
     ];
     let reply = || ok(r#"{"FailedEntryCount":0,"Entries":[{"EventId":"e1"}]}"#);
     let Some(r) = run(&args, vec![reply()]) else {
@@ -995,46 +1009,55 @@ fn s3_select_object_content_writes_records_to_outfile() {
 #[test]
 fn event_streams_in_rest_json_and_json_rpc_outputs() {
     // rest-json: the stream is the HTTP payload, other members are headers.
+    // The CLI removes lambda invoke-with-response-stream (removals.py), so
+    // the client is called directly.
+    let Some(loader) = common::loader_or_skip() else {
+        return;
+    };
     let mut body = event("PayloadChunk", b"hello ");
     body.extend(event("PayloadChunk", b"world"));
     body.extend(event("InvokeComplete", br#"{"LogResult":"bG9n"}"#));
-    let Some(r) = run(
-        &[
-            "lambda",
-            "invoke-with-response-stream",
-            "--function-name",
-            "f",
-        ],
-        vec![Response {
-            status: 200,
-            headers: vec![("X-Amz-Executed-Version".into(), "$LATEST".into())],
-            body,
-        }],
-    ) else {
-        return;
+    let transport = FakeTransport::new(vec![Response {
+        status: 200,
+        headers: vec![("X-Amz-Executed-Version".into(), "$LATEST".into())],
+        body,
+    }]);
+    let env = default_env();
+    let ctx = test_context(loader, &transport, env);
+    let model = ctx.loader.service_model("lambda").unwrap();
+    let config = awsr::client::ClientConfig {
+        region: "us-east-1".into(),
+        ..Default::default()
     };
-    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
-    let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    let client = awsr::client::Client::new(&ctx, &model, config, None).unwrap();
+    let mut params = awsr::value::Map::new();
+    params.insert("FunctionName".into(), awsr::value::Value::Str("f".into()));
+    let v = client
+        .call(
+            "InvokeWithResponseStream",
+            &awsr::value::Value::Map(params),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    let out = v.to_json(awsr::value::TimestampStyle::Iso8601);
     assert_eq!(out["ExecutedVersion"], "$LATEST");
     assert_eq!(out["EventStream"][0]["PayloadChunk"]["Payload"], "aGVsbG8g");
     assert_eq!(out["EventStream"][2]["InvokeComplete"]["LogResult"], "bG9n");
+    drop(ctx);
 
     // json RPC: the first message is the initial response.
     let mut body = event("initial-response", b"{}");
     body.extend(event(
-        "SubscribeToShardEvent",
-        br#"{"Records":[],"ContinuationSequenceNumber":"1","MillisBehindLatest":0}"#,
+        "sessionStart",
+        br#"{"requestId":"r-1","sessionId":"s-1"}"#,
     ));
     let Some(r) = run(
         &[
-            "kinesis",
-            "subscribe-to-shard",
-            "--consumer-arn",
-            "arn:aws:kinesis:us-east-1:123456789012:stream/s/consumer/c:1",
-            "--shard-id",
-            "shardId-000000000000",
-            "--starting-position",
-            "Type=LATEST",
+            "logs",
+            "start-live-tail",
+            "--log-group-identifiers",
+            "arn:aws:logs:us-east-1:123456789012:log-group:g",
         ],
         vec![Response {
             status: 200,
@@ -1046,8 +1069,545 @@ fn event_streams_in_rest_json_and_json_rpc_outputs() {
     };
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
-    assert_eq!(
-        out["EventStream"][0]["SubscribeToShardEvent"]["ContinuationSequenceNumber"],
-        "1"
+    assert_eq!(out["responseStream"][0]["sessionStart"]["sessionId"], "s-1");
+}
+
+#[test]
+fn argument_renames_hidden_aliases_and_removed_commands() {
+    let image = |flag: &str| {
+        run(
+            &[
+                "ec2",
+                "create-image",
+                "--instance-id",
+                "i-1",
+                "--name",
+                "image",
+                flag,
+            ],
+            vec![ok(
+                "<CreateImageResponse><imageId>ami-1</imageId></CreateImageResponse>",
+            )],
+        )
+    };
+    // `ec2.create-image.no-no-reboot` is renamed to `--reboot`.
+    let Some(r) = image("--reboot") else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(body(&r.requests[0]).contains("NoReboot=false"));
+    let r = image("--no-reboot").unwrap();
+    assert!(body(&r.requests[0]).contains("NoReboot=true"));
+    let r = image("--no-no-reboot").unwrap();
+    assert_eq!(r.code, 252);
+    assert!(
+        r.stderr.contains("Unknown options: --no-no-reboot"),
+        "{}",
+        r.stderr
     );
+
+    // Hidden alias: the old spelling still works.
+    let r = run(
+        &[
+            "elasticache",
+            "create-replication-group",
+            "--replication-group-id",
+            "g",
+            "--replication-group-description",
+            "d",
+            "--preferred-cache-cluster-a-zs",
+            "us-east-1a",
+            "us-east-1b",
+        ],
+        vec![ok("<CreateReplicationGroupResponse><CreateReplicationGroupResult/></CreateReplicationGroupResponse>")],
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert!(
+        body(&r.requests[0]).contains("PreferredCacheClusterAZs.AvailabilityZone.2=us-east-1b"),
+        "{}",
+        body(&r.requests[0])
+    );
+
+    // removals.py
+    let r = run(
+        &["ses", "verify-email-address", "--email-address", "a@b"],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains("Invalid choice: 'verify-email-address'"));
+
+    // signin.py: renamed, with the old name kept as a hidden alias.
+    let loader = common::loader_or_skip().unwrap();
+    let model = loader.service_model("signin").unwrap();
+    let cmds = awsr::customize::operation_commands(&model, "signin");
+    let find = |n: &str| cmds.iter().find(|c| c.cli_name == n).cloned();
+    assert!(!find("create-oauth2-token").unwrap().hidden);
+    assert!(find("create-o-auth2-token").unwrap().hidden);
+    assert!(find("create-oauth2-token-with-iam").is_some());
+    assert!(find("create-o-auth2-token-with-iam").is_none());
+}
+
+#[test]
+fn manual_paging_token_is_hidden_but_disables_pagination() {
+    let page = r#"<DescribeInstancesResponse><reservationSet/><nextToken>t2</nextToken></DescribeInstancesResponse>"#;
+    let Some(r) = run(
+        &["ec2", "describe-instances", "--next-token", "t1"],
+        vec![ok(page)],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.requests.len(), 1);
+    assert!(body(&r.requests[0]).contains("NextToken=t1"));
+    let out: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(out["NextToken"], "t2");
+}
+
+#[test]
+fn model_validation_runs_before_sending() {
+    // Same report as botocore's ParamValidator (checked against awscli).
+    let Some(r) = run(
+        &[
+            "dynamodb",
+            "list-tables",
+            "--exclusive-start-table-name",
+            "b",
+        ],
+        vec![],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 252);
+    assert_eq!(
+        r.stderr,
+        "\nParameter validation failed:\nInvalid length for parameter ExclusiveStartTableName, value: 1, valid min length: 3\n"
+    );
+    assert!(r.requests.is_empty());
+    let r = run(
+        &[
+            "events",
+            "put-events",
+            "--entries",
+            "Source=app,DetailType=t,Detail={}",
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains(
+        "Invalid type for parameter Entries[0].Detail, value: {}, type: <class 'dict'>, valid types: <class 'str'>"
+    ));
+}
+
+fn status(code: u16, body: &str) -> Response {
+    Response {
+        status: code,
+        headers: vec![],
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+/// Run with recorded sleeps.
+fn run_recording_sleeps(
+    args: &[&str],
+    responses: Vec<Response>,
+    env: HashMap<String, String>,
+) -> Option<(Run, Vec<std::time::Duration>)> {
+    let loader = common::loader_or_skip()?;
+    let transport = FakeTransport::new(responses);
+    let sleeps = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let mut ctx = test_context(loader, &transport, env);
+    let recorder = sleeps.clone();
+    ctx.sleep = Box::new(move |d| recorder.borrow_mut().push(d));
+    let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = driver::run(&ctx, &argv, &mut out, &mut err);
+    drop(ctx);
+    let sleeps = sleeps.borrow().clone();
+    Some((
+        Run {
+            code,
+            stdout: String::from_utf8(out).unwrap(),
+            stderr: String::from_utf8(err).unwrap(),
+            requests: transport.requests.take(),
+        },
+        sleeps,
+    ))
+}
+
+#[test]
+fn standard_retries_transient_and_throttling_errors() {
+    let identity = r#"<GetCallerIdentityResponse><GetCallerIdentityResult><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>"#;
+    let Some((r, sleeps)) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(503, ""), ok(identity)],
+        default_env(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.requests.len(), 2);
+    assert_eq!(r.requests[0].header("amz-sdk-request"), Some("attempt=1"));
+    assert_eq!(
+        r.requests[1].header("amz-sdk-request"),
+        Some("attempt=2; max=3")
+    );
+    let id = r.requests[0].header("amz-sdk-invocation-id");
+    assert!(id.is_some());
+    assert_eq!(r.requests[1].header("amz-sdk-invocation-id"), id);
+    // rand * min(2 ** (attempt - 1), 20) with attempt 1.
+    assert_eq!(sleeps.len(), 1);
+    assert!(sleeps[0] < std::time::Duration::from_secs(1));
+
+    // Throttling is retried until max_attempts, then reported.
+    let throttled = r#"<ErrorResponse><Error><Code>Throttling</Code><Message>Rate exceeded</Message></Error></ErrorResponse>"#;
+    let (r, sleeps) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![
+            status(400, throttled),
+            status(400, throttled),
+            status(400, throttled),
+        ],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 254);
+    assert_eq!(r.requests.len(), 3);
+    assert_eq!(sleeps.len(), 2);
+    assert!(sleeps[1] < std::time::Duration::from_secs(2));
+    assert!(r.stderr.contains("(Throttling)"), "{}", r.stderr);
+
+    // Non-retryable errors are not retried.
+    let invalid = r#"<ErrorResponse><Error><Code>InvalidClientTokenId</Code><Message>bad</Message></Error></ErrorResponse>"#;
+    let (r, _) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(403, invalid)],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1);
+
+    // max_attempts and retry_mode.
+    let mut env = default_env();
+    env.insert("AWS_MAX_ATTEMPTS".into(), "1".into());
+    let (r, _) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(500, ""), ok(identity)],
+        env,
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1);
+    assert_ne!(r.code, 0);
+    let mut env = default_env();
+    env.insert("AWS_RETRY_MODE".into(), "legacy".into());
+    let (r, _) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(500, ""), ok(identity)],
+        env,
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1);
+    let mut env = default_env();
+    env.insert("AWS_RETRY_MODE".into(), "bogus".into());
+    let (r, _) = run_recording_sleeps(&["sts", "get-caller-identity"], vec![], env).unwrap();
+    assert_eq!(r.code, 253);
+    assert!(r.stderr.contains("retry_mode"), "{}", r.stderr);
+
+    // Connection errors are retried too.
+    let (r, sleeps) =
+        run_recording_sleeps(&["sts", "get-caller-identity"], vec![], default_env()).unwrap();
+    assert_eq!(r.requests.len(), 3);
+    assert_eq!(sleeps.len(), 2);
+    assert_eq!(r.code, 255);
+}
+
+#[test]
+fn table_and_yaml_output() {
+    let xml = r#"<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::1:user/a</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult></GetCallerIdentityResponse>"#;
+    let Some(r) = run(
+        &["sts", "get-caller-identity", "--output", "table"],
+        vec![ok(xml)],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(
+        r.stdout,
+        // Generated by awscli's TableFormatter.
+        "\
+-----------------------------------------------------
+|                 GetCallerIdentity                 |
++---------------+-------------------------+---------+
+|    Account    |           Arn           | UserId  |
++---------------+-------------------------+---------+
+|  123456789012 |  arn:aws:iam::1:user/a  |  AIDA   |
++---------------+-------------------------+---------+
+"
+    );
+    let r = run(
+        &["sts", "get-caller-identity", "--output", "yaml"],
+        vec![ok(xml)],
+    )
+    .unwrap();
+    assert_eq!(
+        r.stdout,
+        "Account: '123456789012'\nArn: arn:aws:iam::1:user/a\nUserId: AIDA\n"
+    );
+    let r = run(
+        &[
+            "sts",
+            "get-caller-identity",
+            "--output",
+            "yaml-stream",
+            "--query",
+            "Account",
+        ],
+        vec![ok(xml)],
+    )
+    .unwrap();
+    assert_eq!(r.stdout, "- '123456789012'\n");
+    let r = run(&["sts", "get-caller-identity", "--color", "bogus"], vec![]).unwrap();
+    assert_eq!(r.code, 252);
+}
+
+#[test]
+fn generate_cli_skeleton_matches_awscli() {
+    let cases = common::read_json(&common::fixtures().join("skeleton/cases.json"));
+    let mut failures = Vec::new();
+    for case in cases.as_array().unwrap() {
+        let (command, operation, mode) = (
+            case["command"].as_str().unwrap(),
+            case["operation"].as_str().unwrap(),
+            case["mode"].as_str().unwrap(),
+        );
+        let mut args = vec![command, operation, "--generate-cli-skeleton", mode];
+        // `output` keeps the required arguments.
+        let required: &[&str] = match (operation, mode) {
+            ("assume-role", "output") => &[
+                "--role-arn",
+                "arn:aws:iam::123456789012:role/r",
+                "--role-session-name",
+                "sess",
+            ],
+            ("create-table", "output") => &[
+                "--table-name",
+                "tbl",
+                "--attribute-definitions",
+                "AttributeName=a,AttributeType=S",
+                "--key-schema",
+                "AttributeName=a,KeyType=HASH",
+            ],
+            ("put-item", "output") => &["--table-name", "tbl", "--item", "{}"],
+            ("put-object", "output") => &["--bucket", "b", "--key", "k"],
+            ("set-queue-attributes", "output") => &["--queue-url", "u", "--attributes", "A=b"],
+            ("run-instances", "output") => &["--max-count", "1", "--min-count", "1"],
+            ("create-function", "output") => &[
+                "--function-name",
+                "f",
+                "--role",
+                "arn:aws:iam::123456789012:role/r",
+                "--code",
+                "ZipFile=YQ==",
+            ],
+            ("put-events", "output") => &["--entries", "Source=a"],
+            _ => &[],
+        };
+        args.extend_from_slice(required);
+        let Some(r) = run(&args, vec![]) else {
+            return;
+        };
+        if r.code != 0 || r.stdout != case["expected"].as_str().unwrap() {
+            failures.push(format!(
+                "{command} {operation} {mode} (exit {}): {}\n--- expected\n{}\n--- got\n{}",
+                r.code,
+                r.stderr,
+                case["expected"].as_str().unwrap(),
+                r.stdout
+            ));
+        }
+        assert!(r.requests.is_empty());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn cli_input_yaml_and_exclusivity() {
+    let reply = || ok(r#"{"TableNames":[]}"#);
+    let Some(r) = run(
+        &[
+            "dynamodb",
+            "list-tables",
+            "--cli-input-yaml",
+            "Limit: 5\nExclusiveStartTableName: tbl-a\n",
+            "--no-paginate",
+        ],
+        vec![reply()],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(
+        body(&r.requests[0]),
+        // Document order, like the Python dict botocore serializes.
+        r#"{"Limit":5,"ExclusiveStartTableName":"tbl-a"}"#
+    );
+    let r = run(
+        &[
+            "dynamodb",
+            "list-tables",
+            "--cli-input-yaml",
+            "Limit: 5",
+            "--cli-input-json",
+            "{}",
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(
+        r.stderr
+            .contains("Only one --cli-input- parameter may be specified.")
+    );
+}
+
+fn instances(states: &[&str]) -> Response {
+    let items: String = states
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            format!("<item><instanceId>i-{i}</instanceId><instanceState><name>{s}</name></instanceState></item>")
+        })
+        .collect();
+    ok(&format!(
+        "<DescribeInstancesResponse><reservationSet><item><instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>"
+    ))
+}
+
+#[test]
+fn waiters_poll_until_a_final_state() {
+    let args = [
+        "ec2",
+        "wait",
+        "instance-running",
+        "--instance-ids",
+        "i-0",
+        "i-1",
+    ];
+    let Some((r, sleeps)) = run_recording_sleeps(
+        &args,
+        vec![
+            instances(&["pending", "running"]),
+            instances(&["running", "running"]),
+        ],
+        default_env(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.requests.len(), 2);
+    assert!(body(&r.requests[0]).contains("Action=DescribeInstances"));
+    assert!(body(&r.requests[0]).contains("InstanceId.2=i-1"));
+    assert_eq!(sleeps, vec![std::time::Duration::from_secs(15)]);
+
+    // A failure acceptor ends the wait.
+    let (r, _) = run_recording_sleeps(
+        &args,
+        vec![instances(&["running", "terminated"])],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 255);
+    assert_eq!(
+        r.stderr,
+        "\nWaiter InstanceRunning failed: Waiter encountered a terminal failure state: \
+         For expression \"Reservations[].Instances[].State.Name\" we matched expected path: \
+         \"terminated\" at least once\n"
+    );
+
+    // An error no acceptor matches ends the wait; a matched one retries.
+    let err = |code: &str| {
+        status(
+            400,
+            &format!(
+                "<Response><Errors><Error><Code>{code}</Code><Message>m</Message></Error></Errors></Response>"
+            ),
+        )
+    };
+    let (r, _) = run_recording_sleeps(
+        &args,
+        vec![
+            err("InvalidInstanceID.NotFound"),
+            err("UnauthorizedOperation"),
+        ],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr.contains(
+            "Waiter InstanceRunning failed: An error occurred (UnauthorizedOperation): m"
+        ),
+        "{}",
+        r.stderr
+    );
+
+    // Status matchers, and giving up after maxAttempts.
+    let (r, sleeps) = run_recording_sleeps(
+        &["s3api", "wait", "bucket-exists", "--bucket", "b"],
+        (0..20).map(|_| status(404, "")).collect(),
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 255);
+    assert_eq!(r.requests.len(), 20);
+    assert_eq!(r.requests[0].method, "HEAD");
+    assert_eq!(sleeps.len(), 19);
+    assert!(
+        r.stderr.contains(
+            "Waiter BucketExists failed: Max attempts exceeded. Previously accepted state: \
+             Matched expected HTTP status code: 404"
+        ),
+        "{}",
+        r.stderr
+    );
+
+    let r = run(&["ec2", "wait", "bogus-state"], vec![]).unwrap();
+    assert_eq!(r.code, 252);
+}
+
+#[test]
+fn help_pages_match_awscli_man_output() {
+    let fixture = |name: &str| {
+        let text = std::fs::read_to_string(common::fixtures().join("help").join(name)).unwrap();
+        // See tests/fixtures/help/README.md.
+        text.replace(" .\n", ".\n")
+    };
+    let Some(r) = run(&["sts", "get-caller-identity", "help"], vec![]) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, fixture("sts_get-caller-identity.txt"));
+    let r = run(&["ec2", "wait", "help"], vec![]).unwrap();
+    assert_eq!(r.stdout, fixture("ec2_wait.txt"));
+    // Waiter state pages, renamed and boolean arguments, outfile.
+    let r = run(&["ec2", "create-image", "help"], vec![]).unwrap();
+    assert!(r.stdout.contains("[--no-reboot | --reboot]"));
+    let r = run(&["s3api", "get-object", "help"], vec![]).unwrap();
+    assert!(r.stdout.contains("\n          <outfile>\n"));
+    assert!(
+        r.stdout
+            .contains("outfile (string) [required] Filename where the content will be saved")
+    );
+    let r = run(&["ec2", "wait", "instance-running", "help"], vec![]).unwrap();
+    assert!(
+        r.stdout
+            .contains("Wait until JMESPath query Reservations[].Instances[].State.Name returns")
+    );
+    assert!(r.stdout.contains("OUTPUT\n       None\n"));
+    let r = run(&["help"], vec![]).unwrap();
+    assert!(r.stdout.contains("AVAILABLE SERVICES"));
+    assert!(r.stdout.contains("       o s3api\n"));
 }

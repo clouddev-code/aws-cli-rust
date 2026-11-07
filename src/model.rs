@@ -108,6 +108,14 @@ impl ServiceModel {
         &self.raw
     }
 
+    /// Service documentation (HTML).
+    pub fn documentation(&self) -> &str {
+        self.raw
+            .get("documentation")
+            .and_then(J::as_str)
+            .unwrap_or("")
+    }
+
     fn shapes(&self) -> &Map<String, J> {
         self.raw
             .get("shapes")
@@ -265,6 +273,30 @@ impl<'a> Operation<'a> {
             .get("documentation")
             .and_then(J::as_str)
             .unwrap_or("")
+    }
+
+    /// Input or output contains a document type
+    /// (`operation_uses_document_types`).
+    pub fn uses_document_types(&self) -> bool {
+        fn walk(shape: &Shape, seen: &mut Vec<String>) -> bool {
+            if shape.is_document() {
+                return true;
+            }
+            if seen.contains(&shape.name) {
+                return false;
+            }
+            seen.push(shape.name.clone());
+            match shape.type_name() {
+                "structure" => shape.members().iter().any(|(_, m)| walk(m, seen)),
+                "list" => shape.member().is_some_and(|m| walk(&m, seen)),
+                "map" => shape.value().is_some_and(|v| walk(&v, seen)),
+                _ => false,
+            }
+        }
+        [self.input(), self.output()]
+            .iter()
+            .flatten()
+            .any(|s| walk(s, &mut Vec::new()))
     }
 
     pub fn deprecated(&self) -> bool {

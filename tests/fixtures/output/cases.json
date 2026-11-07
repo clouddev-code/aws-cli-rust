@@ -1,0 +1,371 @@
+[
+ {
+  "name": "nested",
+  "data": {
+   "Reservations": [
+    {
+     "ReservationId": "r-1",
+     "OwnerId": "123456789012",
+     "Instances": [
+      {
+       "InstanceId": "i-1",
+       "State": {
+        "Name": "running",
+        "Code": 16
+       },
+       "Tags": [
+        {
+         "Key": "Name",
+         "Value": "web"
+        }
+       ]
+      },
+      {
+       "InstanceId": "i-2",
+       "State": {
+        "Name": "stopped",
+        "Code": 80
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "yaml": "Reservations:\n- Instances:\n  - InstanceId: i-1\n    State:\n      Code: 16\n      Name: running\n    Tags:\n    - Key: Name\n      Value: web\n  - InstanceId: i-2\n    State:\n      Code: 80\n      Name: stopped\n  OwnerId: '123456789012'\n  ReservationId: r-1\n",
+  "yaml_stream": "- Reservations:\n  - Instances:\n    - InstanceId: i-1\n      State:\n        Code: 16\n        Name: running\n      Tags:\n      - Key: Name\n        Value: web\n    - InstanceId: i-2\n      State:\n        Code: 80\n        Name: stopped\n    OwnerId: '123456789012'\n    ReservationId: r-1\n",
+  "table": "-------------------------------------\n|           OperationName           |\n+-----------------------------------+\n||          Reservations           ||\n|+---------------+-----------------+|\n||    OwnerId    |  ReservationId  ||\n|+---------------+-----------------+|\n||  123456789012 |  r-1            ||\n|+---------------+-----------------+|\n|||           Instances           |||\n||+-------------------------------+||\n|||          InstanceId           |||\n||+-------------------------------+||\n|||  i-1                          |||\n||+-------------------------------+||\n||||            State            ||||\n|||+-----------+-----------------+|||\n||||   Code    |      Name       ||||\n|||+-----------+-----------------+|||\n||||  16       |  running        ||||\n|||+-----------+-----------------+|||\n||||            Tags             ||||\n|||+-------------+---------------+|||\n||||     Key     |     Value     ||||\n|||+-------------+---------------+|||\n||||  Name       |  web          ||||\n|||+-------------+---------------+|||\n|||           Instances           |||\n||+-------------------------------+||\n|||          InstanceId           |||\n||+-------------------------------+||\n|||  i-2                          |||\n||+-------------------------------+||\n||||            State            ||||\n|||+-----------+-----------------+|||\n||||   Code    |      Name       ||||\n|||+-----------+-----------------+|||\n||||  80       |  stopped        ||||\n|||+-----------+-----------------+|||\n"
+ },
+ {
+  "name": "single_scalar_key",
+  "data": {
+   "Account": "123456789012"
+  },
+  "yaml": "Account: '123456789012'\n",
+  "yaml_stream": "- Account: '123456789012'\n",
+  "table": "-----------------------------\n|       OperationName       |\n+----------+----------------+\n|  Account |  123456789012  |\n+----------+----------------+\n"
+ },
+ {
+  "name": "flat",
+  "data": {
+   "UserId": "AIDA",
+   "Account": "1",
+   "Arn": "arn:aws:iam::1:user/a"
+  },
+  "yaml": "Account: '1'\nArn: arn:aws:iam::1:user/a\nUserId: AIDA\n",
+  "yaml_stream": "- Account: '1'\n  Arn: arn:aws:iam::1:user/a\n  UserId: AIDA\n",
+  "table": "------------------------------------------------\n|                 OperationName                |\n+---------+-------------------------+----------+\n| Account |           Arn           | UserId   |\n+---------+-------------------------+----------+\n|  1      |  arn:aws:iam::1:user/a  |  AIDA    |\n+---------+-------------------------+----------+\n"
+ },
+ {
+  "name": "scalar_list",
+  "data": {
+   "Names": [
+    "a",
+    "b",
+    "c"
+   ]
+  },
+  "yaml": "Names:\n- a\n- b\n- c\n",
+  "yaml_stream": "- Names:\n  - a\n  - b\n  - c\n",
+  "table": "---------------\n|OperationName|\n+-------------+\n||   Names   ||\n|+-----------+|\n||  a        ||\n||  b        ||\n||  c        ||\n|+-----------+|\n"
+ },
+ {
+  "name": "list_of_lists",
+  "data": {
+   "Rows": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ]
+   ]
+  },
+  "yaml": "Rows:\n- - a\n  - 1\n- - b\n  - 2\n",
+  "yaml_stream": "- Rows:\n  - - a\n    - 1\n  - - b\n    - 2\n",
+  "table": "---------------\n|OperationName|\n+-------------+\n||   Rows    ||\n|+----+------+|\n||  a |  1   ||\n||  b |  2   ||\n|+----+------+|\n"
+ },
+ {
+  "name": "uneven_keys",
+  "data": {
+   "Items": [
+    {
+     "A": 1,
+     "B": true
+    },
+    {
+     "A": 2,
+     "C": null
+    }
+   ]
+  },
+  "yaml": "Items:\n- A: 1\n  B: true\n- A: 2\n  C: null\n",
+  "yaml_stream": "- Items:\n  - A: 1\n    B: true\n  - A: 2\n    C: null\n",
+  "table": "-------------------------\n|     OperationName     |\n+-----------------------+\n||        Items        ||\n|+---+--------+--------+|\n|| A |   B    |   C    ||\n|+---+--------+--------+|\n||  1|  True  |        ||\n||  2|        |  None  ||\n|+---+--------+--------+|\n"
+ },
+ {
+  "name": "wide_chars",
+  "data": {
+   "Items": [
+    {
+     "Name": "日本語の名前",
+     "Id": "1"
+    },
+    {
+     "Name": "x",
+     "Id": "22"
+    }
+   ]
+  },
+  "yaml": "Items:\n- Id: '1'\n  Name: 日本語の名前\n- Id: '22'\n  Name: x\n",
+  "yaml_stream": "- Items:\n  - Id: '1'\n    Name: 日本語の名前\n  - Id: '22'\n    Name: x\n",
+  "table": "--------------------------\n|      OperationName     |\n+------------------------+\n||         Items        ||\n|+-----+----------------+|\n|| Id  |     Name       ||\n|+-----+----------------+|\n||  1  |  日本語の名前  ||\n||  22 |  x             ||\n|+-----+----------------+|\n"
+ },
+ {
+  "name": "too_wide",
+  "data": {
+   "Things": [
+    {
+     "Description": "This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+     "Name": "first",
+     "Id": "id-000001"
+    }
+   ]
+  },
+  "yaml": "Things:\n- Description: This is a fairly long description that keeps going past the eighty\n    column limit so that the YAML emitter has to fold it onto more lines.\n  Id: id-000001\n  Name: first\n",
+  "yaml_stream": "- Things:\n  - Description: This is a fairly long description that keeps going past the eighty\n      column limit so that the YAML emitter has to fold it onto more lines.\n    Id: id-000001\n    Name: first\n",
+  "table": "---------------------------------------------------------------------------------------------------------------------------------------------------------------\n|                                                                        OperationName                                                                        |\n+-------------------------------------------------------------------------------------------------------------------------------------------------------------+\n||                                                                          Things                                                                           ||\n|+-------------+---------------------------------------------------------------------------------------------------------------------------------------------+|\n||  Description|  This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.   ||\n||  Id         |  id-000001                                                                                                                                  ||\n||  Name       |  first                                                                                                                                      ||\n|+-------------+---------------------------------------------------------------------------------------------------------------------------------------------+|\n"
+ },
+ {
+  "name": "too_wide_many",
+  "data": {
+   "Things": [
+    {
+     "Description": "This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+     "Name": "first",
+     "Id": "id-000001"
+    },
+    {
+     "Description": "short",
+     "Name": "second",
+     "Id": "id-000002"
+    }
+   ]
+  },
+  "yaml": "Things:\n- Description: This is a fairly long description that keeps going past the eighty\n    column limit so that the YAML emitter has to fold it onto more lines.\n  Id: id-000001\n  Name: first\n- Description: short\n  Id: id-000002\n  Name: second\n",
+  "yaml_stream": "- Things:\n  - Description: This is a fairly long description that keeps going past the eighty\n      column limit so that the YAML emitter has to fold it onto more lines.\n    Id: id-000001\n    Name: first\n  - Description: short\n    Id: id-000002\n    Name: second\n",
+  "table": "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------\n|                                                                            OperationName                                                                            |\n+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+\n||                                                                              Things                                                                               ||\n|+--------------------------------------------------------------------------------------------------------------------------------------------+------------+---------+|\n||                                                                 Description                                                                |    Id      |  Name   ||\n|+--------------------------------------------------------------------------------------------------------------------------------------------+------------+---------+|\n||  This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.  |  id-000001 |  first  ||\n||  short                                                                                                                                     |  id-000002 |  second ||\n|+--------------------------------------------------------------------------------------------------------------------------------------------+------------+---------+|\n"
+ },
+ {
+  "name": "numbers",
+  "data": {
+   "Int": 3,
+   "Float": 1.5,
+   "Big": 1e+20,
+   "Small": 0.0001,
+   "Neg": -2,
+   "Zero": 0.0
+  },
+  "yaml": "Big: 1e+20\nFloat: 1.5\nInt: 3\nNeg: -2\nSmall: 0.0001\nZero: 0.0\n",
+  "yaml_stream": "- Big: 1e+20\n  Float: 1.5\n  Int: 3\n  Neg: -2\n  Small: 0.0001\n  Zero: 0.0\n",
+  "table": "----------------------------------------------------\n|                   OperationName                  |\n+-------+--------+------+------+----------+--------+\n|  Big  | Float  | Int  | Neg  |  Small   | Zero   |\n+-------+--------+------+------+----------+--------+\n|  1e+20|  1.5   |  3   |  -2  |  0.0001  |  0.0   |\n+-------+--------+------+------+----------+--------+\n"
+ },
+ {
+  "name": "empty_values",
+  "data": {
+   "List": [],
+   "Map": {},
+   "Str": "",
+   "Null": null
+  },
+  "yaml": "List: []\nMap: {}\n'Null': null\nStr: ''\n",
+  "yaml_stream": "- List: []\n  Map: {}\n  'Null': null\n  Str: ''\n",
+  "table": "-----------------\n| OperationName |\n+-------+-------+\n| Null  |  Str  |\n+-------+-------+\n|  None |       |\n+-------+-------+\n"
+ },
+ {
+  "name": "yaml_strings",
+  "data": {
+   "true": "true",
+   "yes": "yes",
+   "on": "on",
+   "null": "null",
+   "tilde": "~",
+   "int": "123",
+   "float": "1.5",
+   "exp": "1e3",
+   "hex": "0x1F",
+   "octal": "0o17",
+   "time": "2015-08-30T12:36:00+00:00",
+   "date": "2015-08-30",
+   "colon": "a: b",
+   "colon_end": "a:",
+   "hash": "#x",
+   "space_hash": "a #b",
+   "lead": " lead",
+   "trail": "trail ",
+   "dash": "-",
+   "dash_space": "- a",
+   "at": "@x",
+   "backtick": "`x",
+   "quote": "it's",
+   "dquote": "say \"hi\"",
+   "brace": "{a}",
+   "bracket": "[a]",
+   "comma": "a, b",
+   "star": "*a",
+   "amp": "&a",
+   "bang": "!a",
+   "pct": "%a",
+   "pipe": "|a",
+   "gt": ">a",
+   "question": "?a",
+   "question_space": "? a",
+   "multiline": "line one\nline two",
+   "trailing_newline": "line\n",
+   "tab": "a\tb",
+   "unicode": "héllo 日本",
+   "emoji": "smile 😀",
+   "control": "bell\u0007",
+   "long": "This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+   "long_word": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "url": "https://example.com/a?b=c#d",
+   "path": "/var/log/app.log",
+   "arn": "arn:aws:s3:::bucket/key",
+   "json": "{\"a\": 1}",
+   "equals": "a=b",
+   "plain": "hello world",
+   "dot": ".",
+   "dots": "...",
+   "docstart": "---",
+   "nan": ".nan",
+   "inf": ".inf",
+   "y": "y",
+   "n": "n",
+   "No": "No",
+   "OFF": "OFF"
+  },
+  "yaml": "No: No\nOFF: OFF\namp: '&a'\narn: arn:aws:s3:::bucket/key\nat: '@x'\nbacktick: '`x'\nbang: '!a'\nbrace: '{a}'\nbracket: '[a]'\ncolon: 'a: b'\ncolon_end: 'a:'\ncomma: a, b\ncontrol: \"bell\\a\"\ndash: '-'\ndash_space: '- a'\ndate: '2015-08-30'\ndocstart: '---'\ndot: .\ndots: '...'\ndquote: say \"hi\"\nemoji: \"smile \\U0001F600\"\nequals: a=b\nexp: '1e3'\nfloat: '1.5'\ngt: '>a'\nhash: '#x'\nhex: '0x1F'\ninf: '.inf'\nint: '123'\njson: '{\"a\": 1}'\nlead: ' lead'\nlong: This is a fairly long description that keeps going past the eighty column limit\n  so that the YAML emitter has to fold it onto more lines.\nlong_word: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nmultiline: 'line one\n\n  line two'\nn: n\nnan: '.nan'\n'null': 'null'\noctal: '0o17'\non: on\npath: /var/log/app.log\npct: '%a'\npipe: '|a'\nplain: hello world\nquestion: ?a\nquestion_space: '? a'\nquote: it's\nspace_hash: 'a #b'\nstar: '*a'\ntab: \"a\\tb\"\ntilde: '~'\ntime: '2015-08-30T12:36:00+00:00'\ntrail: 'trail '\ntrailing_newline: 'line\n\n  '\n'true': 'true'\nunicode: héllo 日本\nurl: https://example.com/a?b=c#d\ny: y\nyes: yes\n",
+  "yaml_stream": "- No: No\n  OFF: OFF\n  amp: '&a'\n  arn: arn:aws:s3:::bucket/key\n  at: '@x'\n  backtick: '`x'\n  bang: '!a'\n  brace: '{a}'\n  bracket: '[a]'\n  colon: 'a: b'\n  colon_end: 'a:'\n  comma: a, b\n  control: \"bell\\a\"\n  dash: '-'\n  dash_space: '- a'\n  date: '2015-08-30'\n  docstart: '---'\n  dot: .\n  dots: '...'\n  dquote: say \"hi\"\n  emoji: \"smile \\U0001F600\"\n  equals: a=b\n  exp: '1e3'\n  float: '1.5'\n  gt: '>a'\n  hash: '#x'\n  hex: '0x1F'\n  inf: '.inf'\n  int: '123'\n  json: '{\"a\": 1}'\n  lead: ' lead'\n  long: This is a fairly long description that keeps going past the eighty column\n    limit so that the YAML emitter has to fold it onto more lines.\n  long_word: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  multiline: 'line one\n\n    line two'\n  n: n\n  nan: '.nan'\n  'null': 'null'\n  octal: '0o17'\n  on: on\n  path: /var/log/app.log\n  pct: '%a'\n  pipe: '|a'\n  plain: hello world\n  question: ?a\n  question_space: '? a'\n  quote: it's\n  space_hash: 'a #b'\n  star: '*a'\n  tab: \"a\\tb\"\n  tilde: '~'\n  time: '2015-08-30T12:36:00+00:00'\n  trail: 'trail '\n  trailing_newline: 'line\n\n    '\n  'true': 'true'\n  unicode: héllo 日本\n  url: https://example.com/a?b=c#d\n  y: y\n  yes: yes\n",
+  "table": "------------------------------------------------------------------------------------------------------------------------------------------------------------------\n|                                                                          OperationName                                                                         |\n+------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\n|  No              |  No                                                                                                                                         |\n|  OFF             |  OFF                                                                                                                                        |\n|  amp             |  &a                                                                                                                                         |\n|  arn             |  arn:aws:s3:::bucket/key                                                                                                                    |\n|  at              |  @x                                                                                                                                         |\n|  backtick        |  `x                                                                                                                                         |\n|  bang            |  !a                                                                                                                                         |\n|  brace           |  {a}                                                                                                                                        |\n|  bracket         |  [a]                                                                                                                                        |\n|  colon           |  a: b                                                                                                                                       |\n|  colon_end       |  a:                                                                                                                                         |\n|  comma           |  a, b                                                                                                                                       |\n|  control         |  bell\u0007                                                                                                                                      |\n|  dash            |  -                                                                                                                                          |\n|  dash_space      |  - a                                                                                                                                        |\n|  date            |  2015-08-30                                                                                                                                 |\n|  docstart        |  ---                                                                                                                                        |\n|  dot             |  .                                                                                                                                          |\n|  dots            |  ...                                                                                                                                        |\n|  dquote          |  say \"hi\"                                                                                                                                   |\n|  emoji           |  smile 😀                                                                                                                                   |\n|  equals          |  a=b                                                                                                                                        |\n|  exp             |  1e3                                                                                                                                        |\n|  float           |  1.5                                                                                                                                        |\n|  gt              |  >a                                                                                                                                         |\n|  hash            |  #x                                                                                                                                         |\n|  hex             |  0x1F                                                                                                                                       |\n|  inf             |  .inf                                                                                                                                       |\n|  int             |  123                                                                                                                                        |\n|  json            |  {\"a\": 1}                                                                                                                                   |\n|  lead            |   lead                                                                                                                                      |\n|  long            |  This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.   |\n|  long_word       |  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                                       |\n|  multiline       |  line one\nline two                                                                                                                          |\n|  n               |  n                                                                                                                                          |\n|  nan             |  .nan                                                                                                                                       |\n|  null            |  null                                                                                                                                       |\n|  octal           |  0o17                                                                                                                                       |\n|  on              |  on                                                                                                                                         |\n|  path            |  /var/log/app.log                                                                                                                           |\n|  pct             |  %a                                                                                                                                         |\n|  pipe            |  |a                                                                                                                                         |\n|  plain           |  hello world                                                                                                                                |\n|  question        |  ?a                                                                                                                                         |\n|  question_space  |  ? a                                                                                                                                        |\n|  quote           |  it's                                                                                                                                       |\n|  space_hash      |  a #b                                                                                                                                       |\n|  star            |  *a                                                                                                                                         |\n|  tab             |  a\tb                                                                                                                                        |\n|  tilde           |  ~                                                                                                                                          |\n|  time            |  2015-08-30T12:36:00+00:00                                                                                                                  |\n|  trail           |  trail                                                                                                                                      |\n|  trailing_newline|  line\n                                                                                                                                      |\n|  true            |  true                                                                                                                                       |\n|  unicode         |  héllo 日本                                                                                                                                |\n|  url             |  https://example.com/a?b=c#d                                                                                                                |\n|  y               |  y                                                                                                                                          |\n|  yes             |  yes                                                                                                                                        |\n+------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\n"
+ },
+ {
+  "name": "yaml_folding",
+  "data": {
+   "long_tab": "This is a fairly long description that keeps going past the eighty column limit\tso that the YAML emitter has to fold it onto more lines.",
+   "long_lead": " This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+   "long_quote": "This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines. it's",
+   "long_multiline": "This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.\nThis is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+   "space_break": "a \nb",
+   "break_space": "a\n b",
+   "wide": "日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 ",
+   "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk": "long key",
+   "multi\nline key": 1,
+   "": "empty key",
+   "nested": [
+    {
+     "deep": {
+      "deeper": [
+       "This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+       " This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.",
+       "This\tis\ta\tfairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines."
+      ]
+     }
+    }
+   ]
+  },
+  "yaml": "'': empty key\nbreak_space: \"a\\n b\"\n? kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\n: long key\nlong_lead: ' This is a fairly long description that keeps going past the eighty column\n  limit so that the YAML emitter has to fold it onto more lines.'\nlong_multiline: 'This is a fairly long description that keeps going past the eighty\n  column limit so that the YAML emitter has to fold it onto more lines.\n\n  This is a fairly long description that keeps going past the eighty column limit\n  so that the YAML emitter has to fold it onto more lines.'\nlong_quote: This is a fairly long description that keeps going past the eighty column\n  limit so that the YAML emitter has to fold it onto more lines. it's\nlong_tab: \"This is a fairly long description that keeps going past the eighty column\n  limit\\tso that the YAML emitter has to fold it onto more lines.\"\n? 'multi\n\n  line key'\n: 1\nnested:\n- deep:\n    deeper:\n    - This is a fairly long description that keeps going past the eighty column limit\n      so that the YAML emitter has to fold it onto more lines.\n    - ' This is a fairly long description that keeps going past the eighty column\n      limit so that the YAML emitter has to fold it onto more lines.'\n    - \"This\\tis\\ta\\tfairly long description that keeps going past the eighty column\n      limit so that the YAML emitter has to fold it onto more lines.\"\nspace_break: \"a \\nb\"\nwide: '日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語\n  日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 '\n",
+  "yaml_stream": "- '': empty key\n  break_space: \"a\\n b\"\n  ? kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\n  : long key\n  long_lead: ' This is a fairly long description that keeps going past the eighty\n    column limit so that the YAML emitter has to fold it onto more lines.'\n  long_multiline: 'This is a fairly long description that keeps going past the eighty\n    column limit so that the YAML emitter has to fold it onto more lines.\n\n    This is a fairly long description that keeps going past the eighty column limit\n    so that the YAML emitter has to fold it onto more lines.'\n  long_quote: This is a fairly long description that keeps going past the eighty column\n    limit so that the YAML emitter has to fold it onto more lines. it's\n  long_tab: \"This is a fairly long description that keeps going past the eighty column\n    limit\\tso that the YAML emitter has to fold it onto more lines.\"\n  ? 'multi\n\n    line key'\n  : 1\n  nested:\n  - deep:\n      deeper:\n      - This is a fairly long description that keeps going past the eighty column\n        limit so that the YAML emitter has to fold it onto more lines.\n      - ' This is a fairly long description that keeps going past the eighty column\n        limit so that the YAML emitter has to fold it onto more lines.'\n      - \"This\\tis\\ta\\tfairly long description that keeps going past the eighty column\n        limit so that the YAML emitter has to fold it onto more lines.\"\n  space_break: \"a \\nb\"\n  wide: '日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語\n    日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 '\n",
+  "table": "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n|                                                                                                                                                                                                       OperationName                                                                                                                                                                                                       |\n+-------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\n|                                                                                                                                     |  empty key                                                                                                                                                                                                                                                                          |\n|  break_space                                                                                                                        |  a\n b                                                                                                                                                                                                                                                                               |\n|  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk |  long key                                                                                                                                                                                                                                                                           |\n|  long_lead                                                                                                                          |   This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.                                                                                                                                          |\n|  long_multiline                                                                                                                     |  This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.\nThis is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.  |\n|  long_quote                                                                                                                         |  This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines. it's                                                                                                                                      |\n|  long_tab                                                                                                                           |  This is a fairly long description that keeps going past the eighty column limit\tso that the YAML emitter has to fold it onto more lines.                                                                                                                                           |\n|  multi\nline key                                                                                                                     |  1                                                                                                                                                                                                                                                                                  |\n|  space_break                                                                                                                        |  a \nb                                                                                                                                                                                                                                                                               |\n|  wide                                                                                                                               |  日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語 日本語                                                                  |\n+-------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+\n||                                                                                                                                                                                                         nested                                                                                                                                                                                                          ||\n|||                                                                                                                                                                                                         deep                                                                                                                                                                                                          |||\n||+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+||\n||||                                                                                                                                                                                                       deeper                                                                                                                                                                                                        ||||\n|||+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+|||\n||||  This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.                                                                                                                                                                                                                                                                           ||||\n||||   This is a fairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.                                                                                                                                                                                                                                                                          ||||\n||||  This\tis\ta\tfairly long description that keeps going past the eighty column limit so that the YAML emitter has to fold it onto more lines.                                                                                                                                                                                                                                                                           ||||\n|||+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+|||\n"
+ },
+ {
+  "name": "bools_and_nulls",
+  "data": {
+   "T": true,
+   "F": false,
+   "N": null
+  },
+  "yaml": "F: false\nN: null\nT: true\n",
+  "yaml_stream": "- F: false\n  N: null\n  T: true\n",
+  "table": "---------------------------\n|      OperationName      |\n+-------+--------+--------+\n|   F   |   N    |   T    |\n+-------+--------+--------+\n|  False|  None  |  True  |\n+-------+--------+--------+\n"
+ },
+ {
+  "name": "top_list",
+  "data": [
+   {
+    "a": 1
+   },
+   {
+    "a": 2,
+    "b": [
+     1,
+     2
+    ]
+   }
+  ],
+  "yaml": "- a: 1\n- a: 2\n  b:\n  - 1\n  - 2\n",
+  "yaml_stream": "- - a: 1\n  - a: 2\n    b:\n    - 1\n    - 2\n",
+  "table": "---------------\n|OperationName|\n+-------------+\n|      a      |\n+-------------+\n|  1          |\n+-------------+\n|OperationName|\n+-------------+\n|      a      |\n+-------------+\n|  2          |\n+-------------+\n||     b     ||\n|+-----------+|\n||  1        ||\n||  2        ||\n|+-----------+|\n"
+ },
+ {
+  "name": "nested_lists",
+  "data": {
+   "L": [
+    [
+     1,
+     2
+    ],
+    [],
+    [
+     [
+      3
+     ]
+    ]
+   ],
+   "M": [
+    {
+     "x": []
+    }
+   ]
+  },
+  "yaml": "L:\n- - 1\n  - 2\n- []\n- - - 3\nM:\n- x: []\n",
+  "yaml_stream": "- L:\n  - - 1\n    - 2\n  - []\n  - - - 3\n  M:\n  - x: []\n",
+  "table_error": "Row should have 2 elements, instead it has 0"
+ },
+ {
+  "name": "unsorted_keys",
+  "data": {
+   "b": 1,
+   "a": 2,
+   "C": 3,
+   "_x": 4
+  },
+  "yaml": "C: 3\n_x: 4\na: 2\nb: 1\n",
+  "yaml_stream": "- C: 3\n  _x: 4\n  a: 2\n  b: 1\n",
+  "table": "-----------------------\n|    OperationName    |\n+---+------+----+-----+\n| C | _x   | a  |  b  |\n+---+------+----+-----+\n|  3|  4   |  2 |  1  |\n+---+------+----+-----+\n"
+ },
+ {
+  "name": "scalar_string",
+  "data": "hello",
+  "yaml": "\"hello\"\n",
+  "yaml_stream": "- hello\n"
+ },
+ {
+  "name": "scalar_int",
+  "data": 5,
+  "yaml": "5\n",
+  "yaml_stream": "- 5\n"
+ },
+ {
+  "name": "scalar_null",
+  "data": null,
+  "yaml": "null\n",
+  "yaml_stream": "- null\n"
+ },
+ {
+  "name": "scalar_bool",
+  "data": true,
+  "yaml": "true\n",
+  "yaml_stream": "- true\n"
+ }
+]

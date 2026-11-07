@@ -7,18 +7,37 @@ use std::io::Write;
 pub enum OutputFormat {
     Json,
     Text,
+    Table,
+    Yaml,
+    YamlStream,
     Off,
 }
+
+/// `CLI_OUTPUT_FORMATS` names, in awscli's order.
+pub const FORMAT_NAMES: &[&str] = &["json", "text", "table", "yaml", "yaml-stream", "off"];
 
 impl OutputFormat {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "json" => Some(OutputFormat::Json),
             "text" => Some(OutputFormat::Text),
+            "table" => Some(OutputFormat::Table),
+            "yaml" => Some(OutputFormat::Yaml),
+            "yaml-stream" => Some(OutputFormat::YamlStream),
             "off" => Some(OutputFormat::Off),
             _ => None,
         }
     }
+}
+
+/// What the table formatter needs besides the data.
+#[derive(Debug, Clone, Default)]
+pub struct TableStyle {
+    /// Section title of the whole table: the operation name.
+    pub title: String,
+    pub terminal_width: usize,
+    /// `--color on`, or `auto` on a terminal (`ColorizedStyler`).
+    pub color: bool,
 }
 
 pub fn apply_query(expr: &str, data: &J) -> Result<J, String> {
@@ -29,12 +48,30 @@ pub fn apply_query(expr: &str, data: &J) -> Result<J, String> {
     serde_json::to_value(&*result).map_err(|e| e.to_string())
 }
 
-pub fn write(format: OutputFormat, data: &J, out: &mut dyn Write) -> std::io::Result<()> {
+pub fn write(
+    format: OutputFormat,
+    data: &J,
+    table: &TableStyle,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    let empty = data == &J::Object(Default::default());
     match format {
         OutputFormat::Off => Ok(()),
+        OutputFormat::Table => {
+            let s = crate::table::render(&table.title, data, table.terminal_width, table.color)
+                .map_err(std::io::Error::other)?;
+            out.write_all(s.as_bytes())
+        }
+        // Nothing is printed for an empty response.
+        OutputFormat::Yaml | OutputFormat::YamlStream if empty => Ok(()),
+        OutputFormat::Yaml => out.write_all(crate::yaml::dump(data).as_bytes()),
+        // Each response (page) becomes a one-element list.
+        OutputFormat::YamlStream => {
+            out.write_all(crate::yaml::dump(&J::Array(vec![data.clone()])).as_bytes())
+        }
         OutputFormat::Json => {
             // The CLI prints nothing for an empty response.
-            if data == &J::Object(Default::default()) {
+            if empty {
                 return Ok(());
             }
             let mut buf = Vec::new();
@@ -179,7 +216,7 @@ mod tests {
 
     fn text(v: J) -> String {
         let mut buf = Vec::new();
-        write(OutputFormat::Text, &v, &mut buf).unwrap();
+        write(OutputFormat::Text, &v, &TableStyle::default(), &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -201,13 +238,20 @@ mod tests {
     #[test]
     fn json_output_and_query() {
         let mut buf = Vec::new();
-        write(OutputFormat::Json, &json!({"A": [1, "ü"]}), &mut buf).unwrap();
+        let style = TableStyle::default();
+        write(
+            OutputFormat::Json,
+            &json!({"A": [1, "ü"]}),
+            &style,
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "{\n    \"A\": [\n        1,\n        \"ü\"\n    ]\n}\n"
         );
         let mut empty = Vec::new();
-        write(OutputFormat::Json, &json!({}), &mut empty).unwrap();
+        write(OutputFormat::Json, &json!({}), &style, &mut empty).unwrap();
         assert!(empty.is_empty());
         assert_eq!(apply_query("A[0]", &json!({"A": [7]})).unwrap(), json!(7));
     }

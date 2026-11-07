@@ -184,5 +184,6 @@ pub fn parse_raw(raw: &str) -> awsr::http::Request {
         headers,
         body: body.as_bytes().to_vec(),
         timeout: None,
+        max_response_bytes: None,
     }
 }

@@ -18,7 +18,19 @@ pub struct Request {
     /// Overall timeout for this request (IMDS and container credentials use
     /// short ones); `None` uses the transport default.
     pub timeout: Option<std::time::Duration>,
+    /// Largest response body accepted; `None` uses
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`].
+    pub max_response_bytes: Option<u64>,
 }
+
+/// Responses are read into memory, so a hostile endpoint must not be able
+/// to make awsr allocate without bound. API responses are far smaller;
+/// streaming payloads (`get-object` outfile, event streams) set their own
+/// limit until the transport streams bodies.
+pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Prefix of the [`TransportError`] for a body over the limit.
+const BODY_LIMIT_MESSAGE: &str = "response body is larger than";
 
 impl Request {
     /// A request for a full URL such as `http://169.254.169.254/latest/api/token`.
@@ -120,6 +132,20 @@ impl Response {
 #[derive(Debug)]
 pub struct TransportError(pub String);
 
+impl TransportError {
+    /// The response exceeded `max_response_bytes`; retrying would not help.
+    pub fn is_body_limit(&self) -> bool {
+        self.0.starts_with(BODY_LIMIT_MESSAGE)
+    }
+
+    /// Connect / read timeouts cost more retry quota
+    /// (`ConnectTimeoutError`, `ReadTimeoutError`).
+    pub fn is_timeout(&self) -> bool {
+        let m = self.0.to_ascii_lowercase();
+        m.contains("timeout") || m.contains("timed out")
+    }
+}
+
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -142,6 +168,12 @@ pub struct UreqTransport {
 fn agent(connect: Option<std::time::Duration>, read: Option<std::time::Duration>) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // Never follow redirects: ureq would re-send custom headers such as
+        // X-Amz-Security-Token to the new host. botocore does not follow
+        // them either; a 3xx is handled as a response.
+        .max_redirects(0)
+        // What Python's http.client sends for botocore.
+        .accept_encoding("identity")
         .timeout_connect(connect)
         .timeout_recv_body(read)
         .timeout_recv_response(read)
@@ -193,12 +225,18 @@ impl Transport for UreqTransport {
                 )
             })
             .collect();
+        let limit = req.max_response_bytes.unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
         let body = resp
             .body_mut()
             .with_config()
-            .limit(u64::MAX)
+            .limit(limit)
             .read_to_vec()
-            .map_err(|e| TransportError(e.to_string()))?;
+            .map_err(|e| match e {
+                ureq::Error::BodyExceedsLimit(_) => {
+                    TransportError(format!("{BODY_LIMIT_MESSAGE} {limit} bytes"))
+                }
+                e => TransportError(e.to_string()),
+            })?;
         Ok(Response {
             status,
             headers,

@@ -20,12 +20,15 @@ const CONTAINER_ALLOWED_HOSTS: &[&str] = &[
 const CONTAINER_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTAINER_ATTEMPTS: usize = 3;
 
+const METADATA_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const IMDS_BASE: &str = "http://169.254.169.254";
 const IMDS_TIMEOUT: Duration = Duration::from_secs(1);
 const IMDS_ROLE_PATH: &str = "/latest/meta-data/iam/security-credentials/";
 
 fn send(ctx: &Context, mut req: Request, timeout: Duration) -> Option<Response> {
     req.timeout = Some(timeout);
+    // Credential documents are tiny.
+    req.max_response_bytes = Some(METADATA_MAX_RESPONSE_BYTES);
     req.set_header("User-Agent", crate::client::USER_AGENT);
     ctx.transport.send(&req).ok()
 }
@@ -38,10 +41,15 @@ fn creds_from(doc: &J, token_field: &str) -> Option<Credentials> {
     })
 }
 
-/// Host part of an `http(s)://host[:port]/...` URL, without IPv6 brackets.
+/// Host part of an `http(s)://[userinfo@]host[:port]/...` URL, without IPv6
+/// brackets. Userinfo ends at the last `@`, as for `urlparse().hostname`
+/// (botocore) and the `http` crate ureq connects with; otherwise
+/// `http://169.254.170.2:x@attacker/` would be checked as an allowed host but
+/// sent to `attacker`.
 fn url_host(url: &str) -> Option<(String, String)> {
     let (scheme, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let host = if let Some(r) = authority.strip_prefix('[') {
         r.split(']').next().unwrap_or("").to_string()
     } else {
@@ -214,5 +222,17 @@ mod tests {
         assert!(!allowed_full_uri("http://attacker.example.com/creds"));
         assert!(!allowed_full_uri("http://169.254.169.254/creds"));
         assert!(!allowed_full_uri("file:///etc/passwd"));
+        // Userinfo is not the host (oss-scan finding on PR #2).
+        assert!(!allowed_full_uri(
+            "http://169.254.170.2:x@attacker.example.com/creds"
+        ));
+        assert!(!allowed_full_uri(
+            "http://169.254.170.2@attacker.example.com/creds"
+        ));
+        assert!(!allowed_full_uri(
+            "http://a@169.254.170.2@attacker.example.com/"
+        ));
+        assert!(allowed_full_uri("http://user@169.254.170.2/creds"));
+        assert!(allowed_full_uri("http://user:pw@[::1]:8080/creds"));
     }
 }

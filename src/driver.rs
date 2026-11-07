@@ -2,14 +2,15 @@
 //! parameters, resolve region/credentials/endpoint, sign, send, format.
 
 use crate::cli::params::{self, BinaryFormat, ParamContext};
-use crate::cli::{self, ArgDef, ArgKind, ArgTarget, ArgValue, Globals, UsageError};
-use crate::client::{self, ChecksumWhen, Client, ClientConfig, ClientError};
+use crate::cli::{self, ArgTarget, ArgValue, Globals, UsageError};
+use crate::client::{self, ChecksumWhen, Client, ClientConfig, ClientError, RetryConfig};
 use crate::credentials::Resolver;
 use crate::loader::Loader;
 use crate::model::{Operation, ServiceModel};
 use crate::naming::cli_name;
 use crate::output::{self, OutputFormat};
 use crate::paginate::{self, PaginationArgs, PaginatorConfig};
+use crate::skeleton;
 use crate::value::{TimestampStyle, Value};
 use serde_json::Value as J;
 use std::io::Write;
@@ -92,11 +93,18 @@ fn run_inner(
         ));
     };
     if command == "help" {
-        let _ = writeln!(out, "Available services:");
-        for c in ctx.loader.command_names() {
-            let _ = writeln!(out, "  {c}");
-        }
-        return Ok(());
+        let mut commands = ctx.loader.command_names();
+        commands.push("login".into());
+        commands.sort();
+        let page = crate::help::top_level(&commands);
+        return emit(
+            ctx,
+            &globals,
+            &profile_name(ctx, &globals),
+            page.as_bytes(),
+            out,
+        )
+        .map_err(Failure::general);
     }
     if command == "login" {
         let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
@@ -123,29 +131,100 @@ fn run_inner(
     })?;
     let model = ctx.loader.service_model(&dir).map_err(Failure::general)?;
 
-    let op_names: Vec<&str> = model.operation_names().collect();
+    let commands = crate::customize::operation_commands(&model, command);
     let Some(sub) = positionals.get(1).map(|s| s.as_str()) else {
         return Err(Failure::usage(format!(
             "aws: error: the following arguments are required: operation (try 'awsr {command} help')"
         )));
     };
+    // `wait <waiter-name>` (customizations/waiters.py) runs the waiter's
+    // operation until it reaches a final state.
+    let waiters = ctx
+        .loader
+        .load_json(&dir, "waiters-2.json")
+        .ok()
+        .flatten()
+        .map(|doc| crate::waiter::waiters(&doc))
+        .unwrap_or_default();
     if sub == "help" {
-        let _ = writeln!(out, "Available operations for {command}:");
-        let mut names: Vec<String> = op_names.iter().map(|n| cli_name(n)).collect();
-        names.sort();
-        for n in names {
-            let _ = writeln!(out, "  {n}");
+        let mut names: Vec<String> = commands
+            .iter()
+            .filter(|c| !c.hidden)
+            .map(|c| c.cli_name.clone())
+            .collect();
+        if !waiters.is_empty() {
+            names.push("wait".into());
         }
-        return Ok(());
+        if command == "sso" {
+            names.extend(["login".to_string(), "logout".to_string()]);
+        }
+        let page = crate::help::command_list(command, model.documentation(), &names, true);
+        return emit(
+            ctx,
+            &globals,
+            &profile_name(ctx, &globals),
+            page.as_bytes(),
+            out,
+        )
+        .map_err(Failure::general);
     }
-    let op_name = op_names
-        .iter()
-        .find(|n| cli_name(n) == sub)
-        .ok_or_else(|| {
-            Failure::usage(format!(
-                "aws: error: argument operation: Invalid choice: '{sub}'"
-            ))
-        })?;
+    let waiter = if sub == "wait" && !waiters.is_empty() {
+        let Some(name) = positionals.get(2).map(|s| s.as_str()) else {
+            return Err(Failure::usage(format!(
+                "aws: error: the following arguments are required: waiter name (try 'awsr {command} wait help')"
+            )));
+        };
+        if name == "help" {
+            let names: Vec<String> = waiters
+                .iter()
+                .map(|w| crate::waiter::waiter_cli_name(&w.name))
+                .collect();
+            let page = crate::help::command_list(
+                "wait",
+                "Wait until a particular condition is satisfied. Each subcommand polls an API until the listed requirement is met.",
+                &names,
+                false,
+            );
+            return emit(
+                ctx,
+                &globals,
+                &profile_name(ctx, &globals),
+                page.as_bytes(),
+                out,
+            )
+            .map_err(Failure::general);
+        }
+        let w = waiters
+            .iter()
+            .find(|w| crate::waiter::waiter_cli_name(&w.name) == name)
+            .cloned()
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "aws: error: argument subcommand: Invalid choice: '{name}'"
+                ))
+            })?;
+        Some(w)
+    } else {
+        None
+    };
+    // The command name customizations are keyed on, and where the
+    // operation's own arguments start.
+    let (cli_op, args_from) = match &waiter {
+        Some(w) => (crate::waiter::waiter_cli_name(&w.name), 3),
+        None => (sub.to_string(), 2),
+    };
+    let op_name = match &waiter {
+        Some(w) => w.operation.as_str(),
+        None => commands
+            .iter()
+            .find(|c| c.cli_name == sub)
+            .map(|c| c.operation.as_str())
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "aws: error: argument operation: Invalid choice: '{sub}'"
+                ))
+            })?,
+    };
     let op = model.operation(op_name).map_err(Failure::general)?;
 
     let paginator = ctx
@@ -155,26 +234,45 @@ fn run_inner(
         .flatten()
         .and_then(|doc| PaginatorConfig::for_operation(&doc, op_name));
     let input = op.input();
-    let mut table = cli::arg_table(input.as_ref(), paginator.is_some(), globals.no_paginate);
     let streaming_output = op.streaming_output_member();
     // `S3SelectStreamOutputArgument`: the Records payloads of the event
     // stream go to the outfile.
     let select_output = (model.service_name == "s3" && op.name == "SelectObjectContent")
         .then(|| op.output().and_then(|o| o.payload().map(str::to_string)))
         .flatten();
-    if streaming_output.is_some() || select_output.is_some() {
-        table.push(ArgDef {
-            cli_name: "outfile".into(),
-            target: ArgTarget::Outfile,
-            kind: ArgKind::Positional,
-            required: true,
-        });
-    }
+    let mut table = cli::arg_table(
+        input.as_ref(),
+        &cli::TableOptions {
+            paginator: paginator.as_ref(),
+            no_paginate: globals.no_paginate,
+            outfile: streaming_output.is_some() || select_output.is_some(),
+        },
+    );
+    crate::customize::customize_arg_table(command, &cli_op, &mut table);
 
-    let op_tokens: Vec<String> = rest.iter().skip(2).cloned().collect();
+    let op_tokens: Vec<String> = rest.iter().skip(args_from).cloned().collect();
     if op_tokens.first().map(String::as_str) == Some("help") {
-        print_op_help(&op, &table, out);
-        return Ok(());
+        let examples = match &waiter {
+            Some(_) => ctx.loader.example(&[command, "wait", &cli_op]),
+            None => ctx.loader.example(&[command, &cli_op]),
+        };
+        let page = crate::help::operation(&crate::help::OperationPage {
+            name: &cli_op,
+            op: &op,
+            description: waiter.as_ref().map(crate::waiter::description),
+            table: &table,
+            paginator: paginator.as_ref(),
+            examples,
+            show_output: waiter.is_none(),
+        });
+        return emit(
+            ctx,
+            &globals,
+            &profile_name(ctx, &globals),
+            page.as_bytes(),
+            out,
+        )
+        .map_err(Failure::general);
     }
     let parsed = cli::parse_op_args(&op_tokens, &table)?;
     if globals.no_paginate {
@@ -214,7 +312,8 @@ fn run_inner(
     // Build parameters in model member order, like `_build_call_parameters`.
     let mut by_member: std::collections::HashMap<String, Value> = Default::default();
     let mut pagination = PaginationArgs::default();
-    let mut cli_input: Option<String> = None;
+    let mut cli_input: Option<(ArgTarget, String)> = None;
+    let mut skeleton: Option<String> = None;
     let mut outfile: Option<String> = None;
     for (idx, value) in &parsed {
         let def = &table[*idx];
@@ -249,7 +348,15 @@ fn run_inner(
                     ArgTarget::StartingToken => pagination.starting_token = Some(w),
                     ArgTarget::PageSize => pagination.page_size = Some(num(&w)?),
                     ArgTarget::MaxItems => pagination.max_items = Some(num(&w)?.max(0) as usize),
-                    ArgTarget::CliInputJson => cli_input = Some(w),
+                    ArgTarget::CliInputJson | ArgTarget::CliInputYaml => {
+                        if cli_input.is_some() {
+                            return Err(Failure::usage(
+                                "Only one --cli-input- parameter may be specified.",
+                            ));
+                        }
+                        cli_input = Some((target.clone(), w));
+                    }
+                    ArgTarget::GenerateCliSkeleton => skeleton = Some(w),
                     ArgTarget::Outfile => outfile = Some(w),
                     ArgTarget::Member(_) => unreachable!(),
                 }
@@ -265,8 +372,19 @@ fn run_inner(
             }
         }
     }
-    if let Some(raw) = cli_input {
-        merge_cli_input(&raw, &mut call_params, binary_format)?;
+    if let Some((target, raw)) = cli_input {
+        merge_cli_input(&target, &raw, &mut call_params, binary_format)?;
+    }
+    match skeleton.as_deref() {
+        Some("input") => {
+            let _ = out.write_all(skeleton::input_json(input.as_ref()).as_bytes());
+            return Ok(());
+        }
+        Some("yaml-input") => {
+            let _ = out.write_all(skeleton::yaml_input(input.as_ref()).as_bytes());
+            return Ok(());
+        }
+        _ => {}
     }
     if let Some(shape) = &input {
         let missing: Vec<String> = shape
@@ -295,7 +413,30 @@ fn run_inner(
     }
     let call_params = Value::Map(call_params);
 
+    // `--generate-cli-skeleton output` validates the input and prints a
+    // sample response instead of calling the service.
+    if skeleton.as_deref() == Some("output") {
+        if let Some(shape) = &input {
+            crate::validate::validate(&call_params, shape)
+                .map_err(|r| client_failure(ClientError::Validation(r), &op.name))?;
+        }
+        let result = op.output().map_or(J::Object(Default::default()), |s| {
+            skeleton::generate(&s, true)
+        });
+        return render_output(ctx, &globals, &op.name, &result, out);
+    }
+
     let client = build_client(ctx, &globals, &model, &op)?;
+    if let Some(w) = &waiter {
+        // Paging arguments are accepted but unused: the waiter calls the
+        // operation once per attempt.
+        return crate::waiter::wait(&client, w, &call_params, &*ctx.sleep, err).map_err(
+            |e| match e {
+                crate::waiter::WaitError::Failed(m) => Failure::general(format!("\n{m}")),
+                crate::waiter::WaitError::Client(e) => client_failure(e, &op.name),
+            },
+        );
+    }
     let call = |p: &Value, err: &mut dyn Write| {
         let mut v = client
             .call(op_name, p, None, err)
@@ -322,39 +463,86 @@ fn run_inner(
         }
         Ok::<_, Failure>(v.to_json(TimestampStyle::Iso8601))
     };
-    let format = match globals
-        .output
-        .clone()
-        .or_else(|| setting(ctx, &globals, "output"))
-    {
-        None => OutputFormat::Json,
-        Some(f) => OutputFormat::parse(&f).ok_or_else(|| {
-            Failure::usage(format!(
-                "aws: error: argument --output: Invalid choice: '{f}' (choose from json, text, off)"
-            ))
-        })?,
-    };
+    // Fail on a bad --output / --color before calling the service.
+    output_settings(ctx, &globals, &op.name)?;
 
+    // A manual (undocumented) paging argument turns pagination off
+    // (`check_should_enable_pagination`), as does kinesis list-streams
+    // `--exclusive-start-stream-name` (kinesis.py).
     let user_gave_token = paginator.as_ref().is_some_and(|p| {
         p.input_tokens.iter().any(|t| call_params.get(t).is_some())
             || p.limit_key
                 .as_ref()
                 .is_some_and(|k| call_params.get(k).is_some())
-    });
+    }) || (command == "kinesis"
+        && op.name == "ListStreams"
+        && call_params.get("ExclusiveStartStreamName").is_some());
     let result = match &paginator {
         Some(cfg) if !globals.no_paginate && !user_gave_token => {
             paginate::paginate(cfg, &call_params, &pagination, |p| call(p, err))?
         }
         _ => call(&call_params, err)?,
     };
+    render_output(ctx, &globals, &op.name, &result, out)
+}
 
+/// `--output` (or the profile's `output`) and the table style.
+fn output_settings(
+    ctx: &Context,
+    globals: &Globals,
+    title: &str,
+) -> Result<(OutputFormat, output::TableStyle), Failure> {
+    let format = match globals
+        .output
+        .clone()
+        .or_else(|| setting(ctx, globals, "output"))
+    {
+        None => OutputFormat::Json,
+        Some(f) => OutputFormat::parse(&f).ok_or_else(|| {
+            Failure::usage(format!(
+                "aws: error: argument --output: Invalid choice: '{f}' (choose from {})",
+                output::FORMAT_NAMES.join(", ")
+            ))
+        })?,
+    };
+    let color = match globals.color.as_deref() {
+        None | Some("auto") => ctx.stdout_is_tty,
+        Some("on") => true,
+        Some("off") => false,
+        Some(other) => {
+            return Err(Failure::usage(format!(
+                "aws: error: argument --color: Invalid choice: '{other}' (choose from on, off, auto)"
+            )));
+        }
+    };
+    let style = output::TableStyle {
+        title: title.to_string(),
+        terminal_width: ctx.terminal_width.unwrap_or(80),
+        color,
+    };
+    Ok((format, style))
+}
+
+/// Apply `--query`, format the result and write it (through the pager).
+fn render_output(
+    ctx: &Context,
+    globals: &Globals,
+    title: &str,
+    result: &J,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let (format, style) = output_settings(ctx, globals, title)?;
+    let queried;
     let result = match &globals.query {
-        Some(q) => output::apply_query(q, &result).map_err(Failure::usage)?,
+        Some(q) => {
+            queried = output::apply_query(q, result).map_err(Failure::usage)?;
+            &queried
+        }
         None => result,
     };
     let mut rendered = Vec::new();
-    output::write(format, &result, &mut rendered).map_err(Failure::general)?;
-    emit(ctx, &globals, &profile_name(ctx, &globals), &rendered, out).map_err(Failure::general)
+    output::write(format, result, &style, &mut rendered).map_err(Failure::general)?;
+    emit(ctx, globals, &profile_name(ctx, globals), &rendered, out).map_err(Failure::general)
 }
 
 /// `settings`: profile value from the shared config.
@@ -371,14 +559,22 @@ fn profile_name(ctx: &Context, globals: &Globals) -> String {
     })
 }
 
-/// `--cli-input-json`: fills in parameters not given on the command line.
+/// `--cli-input-json` / `--cli-input-yaml`: fills in parameters not given
+/// on the command line.
 fn merge_cli_input(
+    target: &ArgTarget,
     raw: &str,
     params: &mut crate::value::Map,
     binary_format: BinaryFormat,
 ) -> Result<(), Failure> {
+    let yaml = *target == ArgTarget::CliInputYaml;
+    let flag = if yaml {
+        "--cli-input-yaml"
+    } else {
+        "--cli-input-json"
+    };
     let pctx = ParamContext {
-        cli_name: "--cli-input-json",
+        cli_name: flag,
         binary_format,
     };
     let text =
@@ -387,10 +583,26 @@ fn merge_cli_input(
             Some(params::Loaded::Bytes(b)) => String::from_utf8_lossy(&b).into_owned(),
             None => raw.to_string(),
         };
-    let doc: J = serde_json::from_str(&text)
-        .map_err(|e| Failure::usage(format!("Invalid JSON received: {e}")))?;
+    let doc = if yaml {
+        yaml_rust2::YamlLoader::load_from_str(&text)
+            .ok()
+            .map(|docs| docs.first().map(yaml_to_json).unwrap_or(J::Null))
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "Error parsing parameter '{flag}': Invalid YAML received."
+                ))
+            })?
+    } else {
+        serde_json::from_str(&text).map_err(|_| {
+            Failure::usage(format!(
+                "Error parsing parameter '{flag}': Invalid JSON received."
+            ))
+        })?
+    };
     let J::Object(obj) = doc else {
-        return Err(Failure::usage("Invalid JSON received: expected an object"));
+        return Err(Failure::usage(format!(
+            "Error parsing parameter '{flag}': Invalid type: expecting map"
+        )));
     };
     for (k, v) in obj {
         params.entry(k).or_insert_with(|| Value::from_json(&v));
@@ -398,33 +610,32 @@ fn merge_cli_input(
     Ok(())
 }
 
-fn print_op_help(op: &Operation, table: &[cli::ArgDef], out: &mut dyn Write) {
-    let _ = writeln!(out, "{}\n", cli_name(&op.name));
-    let doc = strip_tags(op.documentation());
-    if !doc.is_empty() {
-        let _ = writeln!(out, "{doc}\n");
+/// YAML safe-load result as JSON (mapping keys become strings).
+fn yaml_to_json(y: &yaml_rust2::Yaml) -> J {
+    use yaml_rust2::Yaml;
+    match y {
+        Yaml::Real(r) => r
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or_else(|| J::String(r.clone()), J::Number),
+        Yaml::Integer(i) => J::from(*i),
+        Yaml::String(s) => J::String(s.clone()),
+        Yaml::Boolean(b) => J::Bool(*b),
+        Yaml::Array(a) => J::Array(a.iter().map(yaml_to_json).collect()),
+        Yaml::Hash(h) => J::Object(
+            h.iter()
+                .map(|(k, v)| {
+                    let key = match yaml_to_json(k) {
+                        J::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (key, yaml_to_json(v))
+                })
+                .collect(),
+        ),
+        Yaml::Null | Yaml::Alias(_) | Yaml::BadValue => J::Null,
     }
-    let _ = writeln!(out, "Options:");
-    let input = op.input();
-    for def in table {
-        let ty = match (&def.target, &input) {
-            (ArgTarget::Member(m), Some(s)) => s
-                .member_named(m)
-                .map(|x| x.type_name().to_string())
-                .unwrap_or_default(),
-            _ => "string".into(),
-        };
-        let req = if def.required { " (required)" } else { "" };
-        let _ = writeln!(out, "  {} ({ty}){req}", def.cli_name);
-    }
-}
-
-fn strip_tags(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
-    re.replace_all(s, "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Resolve region and credentials and build the API client.
@@ -491,8 +702,19 @@ fn build_client<'a>(
             .env_var("AWS_SIGV4A_SIGNING_REGION_SET")
             .or_else(|| ctx.config.get(&profile, "sigv4a_signing_region_set"))
             .filter(|v| !v.is_empty()),
+        retry: retry_config(ctx, &profile)?,
     };
     Client::new(ctx, model, config, credentials).map_err(Failure::general)
+}
+
+/// `AWS_RETRY_MODE` / `retry_mode` and `AWS_MAX_ATTEMPTS` / `max_attempts`.
+pub(crate) fn retry_config(ctx: &Context, profile: &str) -> Result<RetryConfig, Failure> {
+    let get = |env: &str, key: &str| ctx.env_var(env).or_else(|| ctx.config.get(profile, key));
+    RetryConfig::parse(
+        get("AWS_RETRY_MODE", "retry_mode").as_deref(),
+        get("AWS_MAX_ATTEMPTS", "max_attempts").as_deref(),
+    )
+    .map_err(Failure::config)
 }
 
 /// `--region` -> `AWS_REGION` -> `AWS_DEFAULT_REGION` -> profile `region`.
@@ -571,6 +793,9 @@ fn client_failure(e: ClientError, op_name: &str) -> Failure {
             ),
         },
         ClientError::Params(m) => Failure::usage(format!("Parameter validation failed: {m}")),
+        ClientError::Validation(r) => {
+            Failure::usage(format!("\nParameter validation failed:\n{r}"))
+        }
         other => Failure::general(other),
     }
 }

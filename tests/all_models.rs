@@ -73,10 +73,27 @@ fn every_operation_serializes() {
             unsupported_services.push(format!("{dir} ({proto})"));
             continue;
         }
-        for name in model.operation_names().collect::<Vec<_>>() {
+        let command = awsr::loader::command_for_dir(&dir);
+        for cmd in awsr::customize::operation_commands(&model, &command) {
+            let name = cmd.operation.as_str();
             let op = model.operation(name).unwrap();
             let input = op.input();
-            let table = arg_table(input.as_ref(), true, false);
+            let paginator = awsr::paginate::PaginatorConfig {
+                input_tokens: vec!["NextToken".into()],
+                output_tokens: vec![],
+                limit_key: Some("MaxResults".into()),
+                result_keys: vec!["x".into()],
+                more_results: None,
+                non_aggregate_keys: vec![],
+            };
+            let mut table = arg_table(
+                input.as_ref(),
+                &awsr::cli::TableOptions {
+                    paginator: Some(&paginator),
+                    ..Default::default()
+                },
+            );
+            awsr::customize::customize_arg_table(&command, &cmd.cli_name, &mut table);
             let mut seen = HashSet::new();
             for def in &table {
                 if !seen.insert(def.cli_name.clone()) {
@@ -118,4 +135,38 @@ fn every_operation_serializes() {
             .join("\n")
     );
     assert!(ops > 10_000, "only {ops} operations checked");
+}
+
+/// The embedded archive (latest versions, extras merged, minified) loads the
+/// same documents as the botocore data directory it was built from.
+#[test]
+fn embedded_models_match_the_data_directory() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("reference/aws-cli/awscli/botocore/data");
+    let (Some(embedded), true) = (awsr::loader::Loader::embedded(), dir.is_dir()) else {
+        eprintln!("SKIP: needs both the embedded models and the reference checkout");
+        return;
+    };
+    let fs = awsr::loader::Loader::new(&dir);
+    assert_eq!(embedded.service_dirs(), fs.service_dirs());
+    assert_eq!(embedded.partitions().unwrap(), fs.partitions().unwrap());
+    for service in fs.service_dirs() {
+        for file in [
+            "service-2.json",
+            "paginators-1.json",
+            "waiters-2.json",
+            "endpoint-rule-set-1.json",
+        ] {
+            assert_eq!(
+                embedded.load_json(&service, file).unwrap(),
+                fs.load_json(&service, file).unwrap(),
+                "{service}/{file}"
+            );
+        }
+    }
+    assert_eq!(
+        embedded.example(&["ec2", "wait", "instance-running"]),
+        fs.example(&["ec2", "wait", "instance-running"])
+    );
+    assert!(embedded.example(&["sts", "get-caller-identity"]).is_some());
 }

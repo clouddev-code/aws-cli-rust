@@ -32,6 +32,8 @@ const SECRET_HEADERS: &[&str] = &[
 pub enum ClientError {
     /// Bad parameters for the operation.
     Params(String),
+    /// The model validation report (`ParamValidationError`).
+    Validation(String),
     Endpoint(String),
     Transport(String),
     Service(Box<ServiceError>),
@@ -42,6 +44,7 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::Params(m) => write!(f, "Parameter validation failed: {m}"),
+            ClientError::Validation(r) => write!(f, "Parameter validation failed:\n{r}"),
             ClientError::Endpoint(m) | ClientError::Transport(m) | ClientError::Other(m) => {
                 f.write_str(m)
             }
@@ -73,6 +76,179 @@ impl ChecksumWhen {
     }
 }
 
+/// `retry_mode`. `legacy` registers no retry handler in AWS CLI v2's
+/// botocore, so it never retries; `adaptive` adds client-side rate limiting
+/// on top of `standard`, which is not implemented (it behaves as `standard`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RetryMode {
+    Legacy,
+    #[default]
+    Standard,
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryConfig {
+    pub mode: RetryMode,
+    /// Total attempts including the first (`max_attempts`).
+    pub max_attempts: u32,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        RetryConfig {
+            mode: RetryMode::Standard,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// From `AWS_RETRY_MODE` / `retry_mode` and `AWS_MAX_ATTEMPTS` /
+    /// `max_attempts`.
+    pub fn parse(mode: Option<&str>, max_attempts: Option<&str>) -> Result<Self, String> {
+        let mode = match mode {
+            None | Some("standard") => RetryMode::Standard,
+            Some("legacy") => RetryMode::Legacy,
+            Some("adaptive") => RetryMode::Adaptive,
+            Some(other) => {
+                return Err(format!(
+                    "Invalid value '{other}' for retry_mode. Valid values are: legacy, standard, adaptive"
+                ));
+            }
+        };
+        let max_attempts = match max_attempts {
+            None => DEFAULT_MAX_ATTEMPTS,
+            Some(v) => match v.trim().parse::<u32>() {
+                Ok(n) if n >= 1 => n,
+                _ => {
+                    return Err(format!(
+                        "Value provided to \"max_attempts\": {v} must be an integer greater than or equal to 1"
+                    ));
+                }
+            },
+        };
+        Ok(RetryConfig { mode, max_attempts })
+    }
+}
+
+/// Retry settings that are not configurable (`retries/standard.py` with
+/// `AWS_NEW_RETRIES_2026` unset, as in the CLI).
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+const MAX_BACKOFF_SECS: f64 = 20.0;
+const RETRY_COST: u32 = 5;
+const TIMEOUT_RETRY_COST: u32 = 10;
+const NO_RETRY_INCREMENT: u32 = 1;
+const INITIAL_RETRY_TOKENS: u32 = 500;
+
+const TRANSIENT_ERROR_CODES: &[&str] = &[
+    "RequestTimeout",
+    "RequestTimeoutException",
+    "PriorRequestNotComplete",
+];
+const TRANSIENT_STATUS_CODES: &[u16] = &[500, 502, 503, 504];
+const THROTTLED_ERROR_CODES: &[&str] = &[
+    "Throttling",
+    "ThrottlingException",
+    "ThrottledException",
+    "RequestThrottledException",
+    "TooManyRequestsException",
+    "ProvisionedThroughputExceededException",
+    "TransactionInProgressException",
+    "RequestLimitExceeded",
+    "BandwidthLimitExceeded",
+    "LimitExceededException",
+    "RequestThrottled",
+    "SlowDown",
+    "PriorRequestNotComplete",
+    "EC2ThrottledException",
+];
+
+/// `StandardRetryConditions` minus the attempt limit: transient errors,
+/// throttling, errors modeled as `retryable`, and the special cases (STS
+/// `IDPCommunicationError`, DynamoDB CRC32 mismatches).
+fn retryable(op: &Operation, resp: &crate::http::Response, code: Option<&str>) -> bool {
+    if TRANSIENT_STATUS_CODES.contains(&resp.status) {
+        return true;
+    }
+    if let Some(code) = code {
+        if TRANSIENT_ERROR_CODES.contains(&code) || THROTTLED_ERROR_CODES.contains(&code) {
+            return true;
+        }
+        let modeled = op
+            .get("errors")
+            .and_then(J::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| op.model.resolve_ref(r).ok())
+            .any(|shape| {
+                shape.get("retryable").is_some()
+                    && shape
+                        .get("error")
+                        .and_then(|e| e.get("code"))
+                        .and_then(J::as_str)
+                        .unwrap_or(&shape.name)
+                        == code
+            });
+        if modeled {
+            return true;
+        }
+        if op.model.service_name == "sts" && code == "IDPCommunicationError" {
+            return true;
+        }
+    }
+    if op.model.service_name == "dynamodb"
+        && let Some(expected) = resp.header("x-amz-crc32")
+    {
+        return expected.parse::<u32>().ok() != Some(crc32fast::hash(&resp.body));
+    }
+    false
+}
+
+/// `RetryQuota`: a token bucket shared by the attempts of one client.
+#[derive(Debug)]
+struct RetryQuota {
+    available: std::cell::Cell<u32>,
+    /// Capacity taken by the last retry (`retry_quota_capacity`).
+    last: std::cell::Cell<u32>,
+}
+
+impl RetryQuota {
+    fn new() -> Self {
+        RetryQuota {
+            available: std::cell::Cell::new(INITIAL_RETRY_TOKENS),
+            last: std::cell::Cell::new(0),
+        }
+    }
+
+    fn acquire(&self, amount: u32) -> bool {
+        if amount > self.available.get() {
+            return false;
+        }
+        self.available.set(self.available.get() - amount);
+        self.last.set(amount);
+        true
+    }
+
+    /// `release_retry_quota` after a 2xx response.
+    fn release(&self, retried: bool) {
+        let amount = if retried {
+            self.last.get()
+        } else {
+            NO_RETRY_INCREMENT
+        };
+        let room = INITIAL_RETRY_TOKENS - self.available.get();
+        self.available.set(self.available.get() + amount.min(room));
+    }
+}
+
+/// A parsed response with its HTTP status.
+#[derive(Debug, Clone)]
+pub struct Reply {
+    pub status: u16,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ClientConfig {
     pub region: String,
@@ -84,6 +260,7 @@ pub struct ClientConfig {
     pub response_checksum_validation: ChecksumWhen,
     /// `sigv4a_signing_region_set`
     pub sigv4a_signing_region_set: Option<String>,
+    pub retry: RetryConfig,
 }
 
 pub struct Client<'a> {
@@ -94,6 +271,7 @@ pub struct Client<'a> {
     pub credentials: Option<Credentials>,
     rules: J,
     partitions: J,
+    quota: RetryQuota,
 }
 
 impl<'a> Client<'a> {
@@ -119,6 +297,7 @@ impl<'a> Client<'a> {
             credentials,
             rules,
             partitions,
+            quota: RetryQuota::new(),
         })
     }
 
@@ -131,6 +310,20 @@ impl<'a> Client<'a> {
         before_send: Option<&dyn Fn(&mut Request)>,
         log: &mut dyn Write,
     ) -> Result<Value, ClientError> {
+        self.invoke(op_name, params, before_send, log)
+            .map(|r| r.value)
+    }
+
+    /// Like [`Client::call`], also returning the HTTP status (waiters match
+    /// on it). Retryable failures are retried per the retry mode
+    /// (botocore `endpoint._send_request` + `retries/standard.py`).
+    pub fn invoke(
+        &self,
+        op_name: &str,
+        params: &Value,
+        before_send: Option<&dyn Fn(&mut Request)>,
+        log: &mut dyn Write,
+    ) -> Result<Reply, ClientError> {
         let op = self
             .model
             .operation(op_name)
@@ -139,82 +332,193 @@ impl<'a> Client<'a> {
         let endpoint = RuleSet::new(&self.rules, &self.partitions)
             .resolve(&self.endpoint_params(&op, params))
             .map_err(|e| ClientError::Endpoint(e.to_string()))?;
+        if let Some(input) = op.input() {
+            crate::validate::validate(params, &input).map_err(ClientError::Validation)?;
+        }
         let serialized =
             ser::serialize(&op, params).map_err(|e| ClientError::Params(e.to_string()))?;
-        let mut req = serialized.into_request(&endpoint.url);
+        let mut base = serialized.into_request(&endpoint.url);
         for (name, values) in &endpoint.headers {
             let joined = values
                 .as_array()
                 .map(|a| a.iter().filter_map(J::as_str).collect::<Vec<_>>().join(","))
                 .unwrap_or_default();
-            req.set_header(name, joined);
+            base.set_header(name, joined);
         }
-        req.set_header("User-Agent", USER_AGENT);
-        let request_checksum = self.request_checksum(&op, params, &req)?;
-        let payload = request_checksum
-            .as_ref()
-            .and_then(|c| apply_request_checksum(c, &mut req));
+        base.set_header("User-Agent", USER_AGENT);
+        // Streaming payloads are still read into memory as a whole.
+        let streaming = op.streaming_output_member().is_some()
+            || op
+                .output()
+                .is_some_and(|o| o.event_stream_member().is_some());
+        if streaming {
+            base.max_response_bytes = Some(u64::MAX);
+        }
+        let request_checksum = self.request_checksum(&op, params, &base)?;
+        let signing = match &self.credentials {
+            Some(_) if !is_unsigned(&op) => Some(self.signing_context(&op, &endpoint.properties)?),
+            _ => None,
+        };
 
-        if let Some(creds) = &self.credentials
-            && !is_unsigned(&op)
-        {
-            let signing = self.signing_context(&op, &endpoint.properties)?;
-            let s3 = signing.s3;
-            let payload = payload.or_else(|| {
-                // S3 skips payload signing for streaming uploads that carry a
-                // checksum over TLS (`S3SigV4Auth._should_sha256_sign_payload`).
-                let checksummed = req.has_header("Content-MD5")
-                    || request_checksum
-                        .as_ref()
-                        .is_some_and(|c| req.has_header(&c.algorithm.header()));
-                (s3 && req.scheme == "https" && checksummed && op.has_streaming_input())
-                    .then_some(crate::sigv4::UNSIGNED_PAYLOAD)
-            });
-            let signer = Signer {
-                credentials: creds,
-                region: &signing.region,
-                service: &signing.name,
-                s3,
-                payload,
-                asymmetric: signing.asymmetric,
+        let invocation_id = (self.ctx.uuid)();
+        let retry = &self.config.retry;
+        let mut attempt = 1u32;
+        loop {
+            let mut req = base.clone();
+            // `add_retry_headers`; `max` is known once the first attempt has
+            // been checked for a retry.
+            req.set_header("amz-sdk-invocation-id", invocation_id.clone());
+            let sdk_request = if attempt > 1 {
+                format!("attempt={attempt}; max={}", retry.max_attempts)
+            } else {
+                format!("attempt={attempt}")
             };
-            let sig = signer.sign(&mut req, (self.ctx.now)());
+            req.set_header("amz-sdk-request", sdk_request);
+            let payload = request_checksum
+                .as_ref()
+                .and_then(|c| apply_request_checksum(c, &mut req));
+            if let (Some(creds), Some(signing)) = (&self.credentials, &signing) {
+                let s3 = signing.s3;
+                let payload = payload.or_else(|| {
+                    // S3 skips payload signing for streaming uploads that
+                    // carry a checksum over TLS
+                    // (`S3SigV4Auth._should_sha256_sign_payload`).
+                    let checksummed = req.has_header("Content-MD5")
+                        || request_checksum
+                            .as_ref()
+                            .is_some_and(|c| req.has_header(&c.algorithm.header()));
+                    (s3 && req.scheme == "https" && checksummed && op.has_streaming_input())
+                        .then_some(crate::sigv4::UNSIGNED_PAYLOAD)
+                });
+                let signer = Signer {
+                    credentials: creds,
+                    region: &signing.region,
+                    service: &signing.name,
+                    s3,
+                    payload,
+                    asymmetric: signing.asymmetric,
+                };
+                let sig = signer.sign(&mut req, (self.ctx.now)());
+                if self.config.debug {
+                    let _ = writeln!(
+                        log,
+                        "CanonicalRequest:\n{}\n\nStringToSign:\n{}",
+                        redact_canonical(&sig.canonical_request),
+                        sig.string_to_sign
+                    );
+                }
+            }
+            if let Some(hook) = before_send {
+                hook(&mut req);
+            }
             if self.config.debug {
+                let _ = writeln!(log, "Request: {} {}", req.method, req.url());
+            }
+            let sent = self.ctx.transport.send(&req);
+            if self.config.debug
+                && let Ok(resp) = &sent
+            {
                 let _ = writeln!(
                     log,
-                    "CanonicalRequest:\n{}\n\nStringToSign:\n{}",
-                    redact_canonical(&sig.canonical_request),
-                    sig.string_to_sign
+                    "Response: {} {}",
+                    resp.status,
+                    String::from_utf8_lossy(&resp.body)
                 );
             }
+            let outcome = sent
+                .map_err(|e| {
+                    if e.is_body_limit() {
+                        return (
+                            ClientError::Transport(format!("{e}: \"{}\"", req.url())),
+                            None,
+                        );
+                    }
+                    let timeout = e.is_timeout();
+                    (
+                        ClientError::Transport(format!(
+                            "Could not connect to the endpoint URL: \"{}\": {e}",
+                            req.url()
+                        )),
+                        Some(timeout),
+                    )
+                })
+                .map(|resp| {
+                    let parsed = self.parse_response(&op, params, &resp);
+                    (resp, parsed)
+                });
+            let delay = match &outcome {
+                _ if retry.mode == RetryMode::Legacy || attempt >= retry.max_attempts => None,
+                Err((_, None)) => None,
+                Err((_, Some(timeout))) => self.retry_delay(attempt, *timeout),
+                Ok((resp, parsed)) => {
+                    let code = match parsed {
+                        Err(ClientError::Service(e)) => Some(e.code.as_str()),
+                        _ => None,
+                    };
+                    retryable(&op, resp, code)
+                        .then(|| self.retry_delay(attempt, false))
+                        .flatten()
+                }
+            };
+            if let Some(delay) = delay {
+                if self.config.debug {
+                    let _ = writeln!(
+                        log,
+                        "Retry needed, retrying request after delay of: {delay:?}"
+                    );
+                }
+                (self.ctx.sleep)(delay);
+                attempt += 1;
+                continue;
+            }
+            return match outcome {
+                Err((e, _)) => Err(e),
+                Ok((resp, parsed)) => {
+                    if (200..300).contains(&resp.status) {
+                        self.quota.release(attempt > 1);
+                    }
+                    parsed.map(|value| Reply {
+                        status: resp.status,
+                        value,
+                    })
+                }
+            };
         }
-        if let Some(hook) = before_send {
-            hook(&mut req);
-        }
-        if self.config.debug {
-            let _ = writeln!(log, "Request: {} {}", req.method, req.url());
-        }
-        let resp = self.ctx.transport.send(&req).map_err(|e| {
-            ClientError::Transport(format!(
-                "Could not connect to the endpoint URL: \"{}\": {e}",
-                req.url()
-            ))
-        })?;
-        if self.config.debug {
-            let _ = writeln!(
-                log,
-                "Response: {} {}",
-                resp.status,
-                String::from_utf8_lossy(&resp.body)
-            );
-        }
+    }
+
+    fn parse_response(
+        &self,
+        op: &Operation,
+        params: &Value,
+        resp: &crate::http::Response,
+    ) -> Result<Value, ClientError> {
         if resp.status < 300 {
-            self.validate_response_checksum(&op, params, &resp)?;
+            self.validate_response_checksum(op, params, resp)?;
         }
-        rparse::parse(&op, &resp).map_err(|e| match e {
+        rparse::parse(op, resp).map_err(|e| match e {
             ParseError::Service(s) => ClientError::Service(s),
             other => ClientError::Other(other.to_string()),
         })
+    }
+
+    /// `RetryQuotaChecker.acquire_retry_quota` + `ExponentialBackoff`: the
+    /// delay before the next attempt, or `None` when the quota is used up.
+    fn retry_delay(&self, attempt: u32, timeout: bool) -> Option<std::time::Duration> {
+        let cost = if timeout {
+            TIMEOUT_RETRY_COST
+        } else {
+            RETRY_COST
+        };
+        if !self.quota.acquire(cost) {
+            return None;
+        }
+        let bytes = (self.ctx.random)(8);
+        let mut buf = [0u8; 8];
+        buf[..bytes.len().min(8)].copy_from_slice(&bytes[..bytes.len().min(8)]);
+        // 53 random bits, like Python's `random.random()`.
+        let rand = (u64::from_le_bytes(buf) >> 11) as f64 / (1u64 << 53) as f64;
+        let base = 2f64.powi(attempt as i32 - 1).min(MAX_BACKOFF_SECS);
+        Some(std::time::Duration::from_secs_f64(rand * base))
     }
 
     /// `scheme://host` of the endpoint an operation would be sent to
