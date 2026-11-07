@@ -59,7 +59,7 @@ src/
   context.rs         外部依存 (Transport, env, 時計, 入力, スリープ, ブラウザ, TTY) の注入口
   client.rs          モデル駆動の API クライアント (driver と認証情報プロバイダが共用)。検証, standard リトライ
   commands.rs        login, sso login / sso logout
-  s3/                aws s3 高レベルコマンド (mod.rs: ls / mb / rb / rm / presign / cp, transfer.rs: 並列転送とマルチパート, filters.rs: --include/--exclude, mime.rs: Content-Type 推測表)
+  s3/                aws s3 高レベルコマンド (mod.rs: cp / ls / mb / mv / presign / rb / rm / sync / website, transfer.rs: 並列転送とマルチパート, filters.rs: --include/--exclude, mime.rs: Content-Type 推測表)
   oauth.rs           PKCE, 認可コードのローカルコールバック受信 (127.0.0.1), JWT クレーム読み取り
   credentials/
     mod.rs           チェーン本体, assume-role (source_profile / credential_source / MFA), web identity
@@ -87,7 +87,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | **P1** | 上記モジュール全体の MVP | **完了** |
 | **P2** | `--generate-cli-skeleton`, `--cli-input-yaml`, table/yaml/yaml-stream 出力 (`--color`), waiters, モデル入力バリデーション, リトライ (standard), ヘルプ文書の整形 | **完了** |
 | **P3** | assume-role, web-identity, SSO, `aws login` セッション, IMDS/コンテナ認証情報, ページャ, `login` (PKCE / `--remote`), `sso login` (PKCE / デバイスコード), `sso logout` | **完了** (`logout` コマンドは未実装) |
-| P4 | S3 のフレキシブルチェックサム (CRC32 等), `aws s3` 高レベルコマンド, smithy-rpc-v2-cbor, event stream, SigV4a | **下回り 4 項目は完了**。`aws s3` は段階 1 (ls / mb / rb / rm / presign / cp、マルチパート・並列) を実装。mv / sync / website は未実装 |
+| P4 | S3 のフレキシブルチェックサム (CRC32 等), `aws s3` 高レベルコマンド, smithy-rpc-v2-cbor, event stream, SigV4a | **下回り 4 項目は完了**。`aws s3` は cp / ls / mb / mv / presign / rb / rm / sync / website を実装 (マルチパート・並列) |
 | **P5** | モデル埋め込み (zstd 圧縮 + 事前変換), `handlers_registry` 相当の改名・非表示表, 補完 | **完了** |
 
 ### テスト結果 (P1 完了時点)
@@ -108,6 +108,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/output_formats.rs` (P2) | 本家の TableFormatter / YAMLFormatter / StreamedYAMLFormatter で生成したフィクスチャ (`tests/fixtures/output/`) との一致。YAML 1.2 の引用規則, 80 桁折り返し, 二重引用のエスケープ, 128 バイト超のキー, 表の縦変換, 全角幅 | 59 ケース 全件一致 |
 | `tests/cli_e2e.rs` (P2/P5) | 改名・非表示エイリアス・削除コマンド, 非表示のページングトークン, バリデーション (本家と同文), standard リトライ (503 / スロットリング / 接続エラー / max_attempts / legacy), table / yaml 出力, `--generate-cli-skeleton` (本家 CLI で生成した 33 ケースと一致), `--cli-input-yaml`, waiters (成功 / 失敗状態 / 未対応エラー / 上限回数, メッセージは botocore で確認), help ページ (本家の man 出力と比較) | 計 32 テスト 成功 |
 | `tests/all_models.rs` (P5) | 埋め込みアーカイブと元のデータディレクトリが全サービス・全ファイルで同じ文書になること | 成功 |
+| `tests/s3_commands.rs` (P4, mv / sync / website 追加分) | sync (アップロード: サイズと時刻の比較, `--delete` とフィルタ, `--size-only` / ダウンロード: ローカルが新しい場合だけ差し替える本家の規則, `--exact-timestamps`, ローカルの `--delete`, ダウンロード後の mtime), mv (ローカル削除, コピー後のコピー元削除, 失敗時は削除しない, 自分自身への mv の拒否), website (PutBucketWebsite) | 計 11 テスト 成功 |
 | `tests/s3_commands.rs` (P4) | リクエスト内容で応答する偽 S3 に対して ls (PRE / サイズ / 集計 / 空のとき 1), mb (LocationConstraint), rb --force, rm (フィルタ / dryrun), cp (アップロード: Content-Type 推測, マルチパート + CRC64NVME, パート失敗で Abort と終了コード 1 / ダウンロード: 再帰, レンジ GET, 親ディレクトリを指すキーの警告と終了コード 2, ディレクトリマーカーの除外 / S3 間コピー / 8 並列), presign (botocore と同じ URL) | 6 テスト 成功 |
 | `tests/completion.rs` (P5) | コマンド, オペレーション, waiter, 引数名 (非表示・使用済みを除く), 値 (選択肢, プロファイル, リージョン, enum) | 2 テスト 成功 |
 | チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 以外), aws-chunked の形式 | 成功 |
@@ -125,7 +126,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 ## 5. 既知の非互換・未対応
 
 - カスタマイズコマンド (`configure`, `ec2 run-instances --count` など) は未実装 (`login` / `sso login` / `sso logout` / `aws s3` の一部は実装済み)。
-- `aws s3`: mv / sync / website は未実装。cp の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
+- `aws s3` の cp / mv / sync の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size` のみ と、sync の `--delete --size-only --exact-timestamps` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks`, `--tags`, sync の `--no-overwrite` / `--case-conflict` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
 - `aws s3`: レンジ GET による分割ダウンロードでは、本家のようなパートの CRC を結合した全体チェックサムの照合はしない (206 応答のチェックサム検証は省略)。Content-Type の推測は Python 組み込みの mimetypes 表 (システムの mime.types は読まない) を使う。
 - `aws s3 cp` の S3 間コピー: `--copy-props` は未対応。マルチパートコピー (`multipart_threshold` 以上) ではコピー元のメタデータを引き継がない (s3transfer 単体と同じ。本家 awscli は既定でコピー元の HeadObject から引き継ぐ)。
 - `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。応答本文も、オブジェクトやレンジの期待サイズ + 1 MiB を上限にする。

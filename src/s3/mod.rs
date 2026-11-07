@@ -16,12 +16,15 @@ use crate::client::Client;
 use crate::context::Context;
 use crate::driver::Failure;
 use crate::value::{Map, Value};
+use chrono::{DateTime, Utc};
 use filters::Filters;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use transfer::{Outcome, Transfer, TransferConfig};
 
-const COMMANDS: &[&str] = &["cp", "ls", "mb", "presign", "rb", "rm"];
+const COMMANDS: &[&str] = &[
+    "cp", "ls", "mb", "mv", "presign", "rb", "rm", "sync", "website",
+];
 
 /// Parsed `aws s3 <command>` arguments (the subset awsr supports).
 #[derive(Debug, Default)]
@@ -35,6 +38,11 @@ struct Args {
     human_readable: bool,
     summarize: bool,
     no_guess_mime_type: bool,
+    delete: bool,
+    size_only: bool,
+    exact_timestamps: bool,
+    index_document: Option<String>,
+    error_document: Option<String>,
     /// (include?, pattern) in command-line order.
     filters: Vec<(bool, String)>,
     page_size: Option<i64>,
@@ -54,6 +62,9 @@ const FLAGS: &[&str] = &[
     "--human-readable",
     "--summarize",
     "--no-guess-mime-type",
+    "--delete",
+    "--size-only",
+    "--exact-timestamps",
 ];
 
 /// Options each command accepts besides positional paths.
@@ -91,6 +102,37 @@ fn allowed(command: &str) -> &'static [&'static str] {
             "--metadata",
             "--no-guess-mime-type",
         ],
+        "mv" => &[
+            "--recursive",
+            "--dryrun",
+            "--quiet",
+            "--only-show-errors",
+            "--include",
+            "--exclude",
+            "--page-size",
+            "--acl",
+            "--storage-class",
+            "--content-type",
+            "--metadata",
+            "--no-guess-mime-type",
+        ],
+        "sync" => &[
+            "--dryrun",
+            "--quiet",
+            "--only-show-errors",
+            "--include",
+            "--exclude",
+            "--page-size",
+            "--acl",
+            "--storage-class",
+            "--content-type",
+            "--metadata",
+            "--no-guess-mime-type",
+            "--delete",
+            "--size-only",
+            "--exact-timestamps",
+        ],
+        "website" => &["--index-document", "--error-document"],
         _ => &[],
     }
 }
@@ -124,6 +166,9 @@ fn parse_args(command: &str, tokens: &[String]) -> Result<Args, Failure> {
                 "--force" => a.force = true,
                 "--human-readable" => a.human_readable = true,
                 "--summarize" => a.summarize = true,
+                "--delete" => a.delete = true,
+                "--size-only" => a.size_only = true,
+                "--exact-timestamps" => a.exact_timestamps = true,
                 _ => a.no_guess_mime_type = true,
             }
             continue;
@@ -155,6 +200,8 @@ fn parse_args(command: &str, tokens: &[String]) -> Result<Args, Failure> {
             "--acl" => a.acl = Some(value),
             "--storage-class" => a.storage_class = Some(value),
             "--content-type" => a.content_type = Some(value),
+            "--index-document" => a.index_document = Some(value),
+            "--error-document" => a.error_document = Some(value),
             _ => a.metadata = Some(value),
         }
     }
@@ -322,7 +369,7 @@ pub(crate) fn run(
     if command == "help" {
         let page = crate::help::command_list(
             "s3",
-            "<p>This section explains prominent concepts and notations in the set of high-level S3 commands provided. awsr implements ls, mb, rb, rm, presign and cp.</p>",
+            "<p>This section explains prominent concepts and notations in the set of high-level S3 commands provided. awsr implements cp, ls, mb, mv, presign, rb, rm, sync and website.</p>",
             &COMMANDS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
             false,
         );
@@ -331,7 +378,7 @@ pub(crate) fn run(
     }
     if !COMMANDS.contains(&command) {
         return Err(Failure::usage(format!(
-            "aws: error: argument operation: Invalid choice: '{command}' (awsr implements ls, mb, rb, rm, presign, cp)"
+            "aws: error: argument operation: Invalid choice: '{command}' (awsr implements cp, ls, mb, mv, presign, rb, rm, sync, website)"
         )));
     }
     let args = parse_args(command, &tokens[1..])?;
@@ -353,7 +400,10 @@ pub(crate) fn run(
         "rb" => cmd.rb(),
         "presign" => cmd.presign(),
         "rm" => cmd.rm(),
-        _ => cmd.cp(),
+        "mv" => cmd.cp(true),
+        "sync" => cmd.sync(),
+        "website" => cmd.website(),
+        _ => cmd.cp(false),
     }
 }
 
@@ -644,9 +694,9 @@ impl S3<'_, '_> {
 
     // -- listing for transfers ----------------------------------------------
 
-    /// Objects below `prefix` (key, size), honoring the filters relative to
+    /// Objects below `prefix`, honoring the filters relative to
     /// `bucket/prefix`.
-    fn list_objects(&mut self, bucket: &str, prefix: &str) -> Result<Vec<(String, u64)>, Failure> {
+    fn list_objects(&mut self, bucket: &str, prefix: &str) -> Result<Vec<Obj>, Failure> {
         let filters = Filters::new(&self.args.filters, &format!("{bucket}/{prefix}"));
         let mut out = Vec::new();
         let mut token: Option<String> = None;
@@ -674,7 +724,11 @@ impl S3<'_, '_> {
                     _ => 0,
                 };
                 if filters.allows(&format!("{bucket}/{key}")) {
-                    out.push((key, size));
+                    out.push(Obj {
+                        key,
+                        size,
+                        last_modified: c.get("LastModified").and_then(crate::timestamp::from_value),
+                    });
                 }
             }
             token = resp
@@ -737,22 +791,25 @@ impl S3<'_, '_> {
             return Err(Failure::usage("<S3Uri>\nError: Invalid argument type"));
         }
         let (bucket, mut key) = bucket_key(&path);
-        let keys: Vec<(String, u64)> = if self.args.recursive {
+        let keys: Vec<String> = if self.args.recursive {
             if !key.is_empty() && !key.ends_with('/') {
                 key.push('/');
             }
             self.list_objects(&bucket, &key)?
+                .into_iter()
+                .map(|o| o.key)
+                .collect()
         } else {
             let filters = Filters::new(&self.args.filters, &bucket);
             if filters.allows(&format!("{bucket}/{key}")) {
-                vec![(key, 0)]
+                vec![key]
             } else {
                 Vec::new()
             }
         };
         let mut transfers = Vec::new();
         let mut shown = Vec::new();
-        for (k, _) in keys {
+        for k in keys {
             shown.push(Shown {
                 kind: "delete",
                 src: format!("s3://{bucket}/{k}"),
@@ -803,58 +860,56 @@ impl S3<'_, '_> {
         Ok(extra)
     }
 
-    fn cp(&mut self) -> Result<i32, Failure> {
-        let usage = "cp <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>";
+    fn website(&mut self) -> Result<i32, Failure> {
+        let path = self.path(0, "website <S3Uri>")?;
+        let bucket = path.strip_prefix("s3://").unwrap_or(&path);
+        let bucket = bucket.strip_suffix('/').unwrap_or(bucket).to_string();
+        let mut config = Map::new();
+        if let Some(index) = &self.args.index_document {
+            let mut m = Map::new();
+            m.insert("Suffix".into(), Value::Str(index.clone()));
+            config.insert("IndexDocument".into(), Value::Map(m));
+        }
+        if let Some(error) = &self.args.error_document {
+            let mut m = Map::new();
+            m.insert("Key".into(), Value::Str(error.clone()));
+            config.insert("ErrorDocument".into(), Value::Map(m));
+        }
+        let mut params = Map::new();
+        params.insert("Bucket".into(), Value::Str(bucket));
+        params.insert("WebsiteConfiguration".into(), Value::Map(config));
+        self.call("PutBucketWebsite", params)
+            .map_err(service("PutBucketWebsite"))?;
+        Ok(0)
+    }
+
+    /// `cp` and `mv` (`mv` deletes each source after its transfer).
+    fn cp(&mut self, is_move: bool) -> Result<i32, Failure> {
+        let usage = if is_move {
+            "mv <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>"
+        } else {
+            "cp <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>"
+        };
         let src = self.path(0, usage)?;
         let dest = self.path(1, usage)?;
         let cwd = std::env::current_dir().map_err(Failure::general)?;
-        let (src_s3, dest_s3) = (src.starts_with("s3://"), dest.starts_with("s3://"));
-        if !src_s3 && !dest_s3 {
-            return Err(Failure::usage(format!(
-                "usage: aws s3 {usage}\nError: Invalid argument type"
-            )));
-        }
-        let mut transfers = Vec::new();
-        let mut shown = Vec::new();
-        match (src_s3, dest_s3) {
-            // upload
-            (false, true) => {
+        let dir = self.direction(&src, &dest, usage)?;
+        let mut plan = Plan::default();
+        let recursive = self.args.recursive;
+        match dir {
+            Direction::Upload => {
                 let local = cwd.join(&src);
                 let (bucket, mut key) = bucket_key(&dest);
-                if self.args.recursive {
+                if recursive {
                     if !local.is_dir() {
                         return Err(Failure::general(format!(
                             "fatal error: The user-provided path {src} does not exist."
                         )));
                     }
-                    if !key.is_empty() && !key.ends_with('/') {
-                        key.push('/');
-                    }
-                    let root = format!("{}/", local.display());
-                    let filters = Filters::new(&self.args.filters, &root);
-                    let mut files = Vec::new();
-                    walk(&local, &mut files);
-                    for (path, size) in files {
-                        if !filters.allows(&path.to_string_lossy()) {
-                            continue;
-                        }
-                        let rel = path
-                            .strip_prefix(&local)
-                            .map(|r| r.to_string_lossy().replace('\\', "/"))
-                            .unwrap_or_default();
-                        let k = format!("{key}{rel}");
-                        shown.push(Shown {
-                            kind: "upload",
-                            src: display_local(&path, &cwd),
-                            dest: Some(format!("s3://{bucket}/{k}")),
-                        });
-                        transfers.push(Transfer::Upload {
-                            extra: self.extra_args(Some(&path))?,
-                            path,
-                            bucket: bucket.clone(),
-                            key: k,
-                            size,
-                        });
+                    with_slash(&mut key);
+                    for f in self.list_local(&local) {
+                        let k = format!("{key}{}", f.rel);
+                        self.plan_upload(&mut plan, &cwd, f.path, f.size, &bucket, k, is_move)?;
                     }
                 } else {
                     let meta = std::fs::metadata(&local).map_err(|_| {
@@ -865,144 +920,467 @@ impl S3<'_, '_> {
                     }
                     let filters = Filters::new(&self.args.filters, &format!("{}", cwd.display()));
                     if filters.allows(&local.to_string_lossy()) {
-                        shown.push(Shown {
-                            kind: "upload",
-                            src: display_local(&local, &cwd),
-                            dest: Some(format!("s3://{bucket}/{key}")),
-                        });
-                        transfers.push(Transfer::Upload {
-                            extra: self.extra_args(Some(&local))?,
-                            path: local,
-                            bucket,
+                        self.plan_upload(
+                            &mut plan,
+                            &cwd,
+                            local,
+                            meta.len(),
+                            &bucket,
                             key,
-                            size: meta.len(),
-                        });
+                            is_move,
+                        )?;
                     }
                 }
             }
-            // download
-            (true, false) => {
+            Direction::Download => {
                 let (bucket, mut key) = bucket_key(&src);
                 let local = cwd.join(&dest);
-                if self.args.recursive {
-                    if !key.is_empty() && !key.ends_with('/') {
-                        key.push('/');
-                    }
-                    for (k, size) in self.list_objects(&bucket, &key)? {
-                        // Directory placeholders are not files.
-                        if k.ends_with('/') {
-                            continue;
-                        }
-                        let rel = &k[key.len()..];
-                        let Some(path) = local_path_for(&local, rel) else {
-                            self.warn(format!(
-                                "warning: Skipping file {rel}. File references a parent directory."
-                            ));
-                            continue;
-                        };
-                        shown.push(Shown {
-                            kind: "download",
-                            src: format!("s3://{bucket}/{k}"),
-                            dest: Some(display_local(&path, &cwd)),
-                        });
-                        transfers.push(Transfer::Download {
-                            bucket: bucket.clone(),
-                            key: k,
-                            size: Some(size),
-                            path,
-                        });
+                if recursive {
+                    with_slash(&mut key);
+                    for o in self.list_objects(&bucket, &key)? {
+                        let rel = o.key[key.len()..].to_string();
+                        self.plan_download(&mut plan, &cwd, &local, &rel, &bucket, o, is_move);
                     }
                 } else {
                     let name = key.rsplit('/').next().unwrap_or(&key).to_string();
                     let path = if local.is_dir() || dest.ends_with('/') {
-                        match local_path_for(&local, &name) {
-                            Some(p) => p,
-                            None => {
-                                return Err(Failure::general(format!(
-                                    "fatal error: Invalid key for a local file name: {key}"
-                                )));
-                            }
-                        }
+                        local_path_for(&local, &name).ok_or_else(|| {
+                            Failure::general(format!(
+                                "fatal error: Invalid key for a local file name: {key}"
+                            ))
+                        })?
                     } else {
                         local
                     };
-                    shown.push(Shown {
-                        kind: "download",
-                        src: format!("s3://{bucket}/{key}"),
-                        dest: Some(display_local(&path, &cwd)),
-                    });
-                    transfers.push(Transfer::Download {
-                        bucket,
-                        key,
-                        size: None,
-                        path,
-                    });
+                    plan.push(
+                        Shown {
+                            kind: kind("download", is_move),
+                            src: format!("s3://{bucket}/{key}"),
+                            dest: Some(display_local(&path, &cwd)),
+                        },
+                        Transfer::Download {
+                            bucket,
+                            key,
+                            size: None,
+                            last_modified: None,
+                            path,
+                            delete_source: is_move,
+                        },
+                    );
                 }
             }
-            // copy
-            _ => {
+            Direction::Copy => {
                 let (src_bucket, mut src_key) = bucket_key(&src);
                 let (bucket, mut key) = bucket_key(&dest);
-                let mut extra = self.extra_args(None)?;
-                // S3 keeps the source's metadata unless told to replace it
-                // (`map_copy_object_params`).
-                if extra.contains_key("Metadata") || extra.contains_key("ContentType") {
-                    extra.insert("MetadataDirective".into(), Value::Str("REPLACE".into()));
-                }
-                if self.args.recursive {
-                    for k in [&mut src_key, &mut key] {
-                        if !k.is_empty() && !k.ends_with('/') {
-                            k.push('/');
-                        }
-                    }
-                    for (k, size) in self.list_objects(&src_bucket, &src_key)? {
-                        let dest_key = format!("{key}{}", &k[src_key.len()..]);
-                        shown.push(Shown {
-                            kind: "copy",
-                            src: format!("s3://{src_bucket}/{k}"),
-                            dest: Some(format!("s3://{bucket}/{dest_key}")),
-                        });
-                        transfers.push(Transfer::Copy {
-                            src_bucket: src_bucket.clone(),
-                            src_key: k,
-                            size: Some(size),
-                            bucket: bucket.clone(),
-                            key: dest_key,
-                            extra: extra.clone(),
-                        });
+                let extra = self.copy_extra_args()?;
+                if recursive {
+                    with_slash(&mut src_key);
+                    with_slash(&mut key);
+                    for o in self.list_objects(&src_bucket, &src_key)? {
+                        let dest_key = format!("{key}{}", &o.key[src_key.len()..]);
+                        plan.push(
+                            Shown {
+                                kind: kind("copy", is_move),
+                                src: format!("s3://{src_bucket}/{}", o.key),
+                                dest: Some(format!("s3://{bucket}/{dest_key}")),
+                            },
+                            Transfer::Copy {
+                                src_bucket: src_bucket.clone(),
+                                src_key: o.key,
+                                size: Some(o.size),
+                                bucket: bucket.clone(),
+                                key: dest_key,
+                                extra: extra.clone(),
+                                delete_source: is_move,
+                            },
+                        );
                     }
                 } else {
                     if key.is_empty() || key.ends_with('/') {
                         key.push_str(src_key.rsplit('/').next().unwrap_or(&src_key));
                     }
-                    shown.push(Shown {
-                        kind: "copy",
-                        src: format!("s3://{src_bucket}/{src_key}"),
-                        dest: Some(format!("s3://{bucket}/{key}")),
-                    });
-                    transfers.push(Transfer::Copy {
-                        src_bucket,
-                        src_key,
-                        size: None,
-                        bucket,
-                        key,
-                        extra,
-                    });
+                    if is_move && src_bucket == bucket && src_key == key {
+                        return Err(Failure::usage(format!(
+                            "Cannot mv a file onto itself: s3://{bucket}/{key}"
+                        )));
+                    }
+                    plan.push(
+                        Shown {
+                            kind: kind("copy", is_move),
+                            src: format!("s3://{src_bucket}/{src_key}"),
+                            dest: Some(format!("s3://{bucket}/{key}")),
+                        },
+                        Transfer::Copy {
+                            src_bucket,
+                            src_key,
+                            size: None,
+                            bucket,
+                            key,
+                            extra,
+                            delete_source: is_move,
+                        },
+                    );
                 }
             }
         }
-        self.execute(transfers, shown)
+        self.execute(plan.transfers, plan.shown)
+    }
+
+    /// `sync`: transfer files that are missing or differ at the destination
+    /// (`comparator.py` and the sync strategies), and with `--delete`
+    /// remove destination files the source does not have.
+    fn sync(&mut self) -> Result<i32, Failure> {
+        let usage = "sync <LocalPath> <S3Uri> or <S3Uri> <LocalPath> or <S3Uri> <S3Uri>";
+        let src = self.path(0, usage)?;
+        let dest = self.path(1, usage)?;
+        let cwd = std::env::current_dir().map_err(Failure::general)?;
+        let dir = self.direction(&src, &dest, usage)?;
+        let mut plan = Plan::default();
+        match dir {
+            Direction::Upload => {
+                let local = cwd.join(&src);
+                if !local.is_dir() {
+                    return Err(Failure::general(format!(
+                        "fatal error: The user-provided path {src} does not exist."
+                    )));
+                }
+                let (bucket, mut prefix) = bucket_key(&dest);
+                with_slash(&mut prefix);
+                let sources = self.list_local(&local);
+                let dests = self.list_objects(&bucket, &prefix)?;
+                let mut dests: std::collections::BTreeMap<String, Obj> = dests
+                    .into_iter()
+                    .map(|o| (o.key[prefix.len()..].to_string(), o))
+                    .collect();
+                for f in sources {
+                    let wanted = match dests.remove(&f.rel) {
+                        None => true,
+                        Some(d) => {
+                            self.should_sync(f.size, f.mtime, d.size, d.last_modified, false)
+                        }
+                    };
+                    if wanted {
+                        let key = format!("{prefix}{}", f.rel);
+                        self.plan_upload(&mut plan, &cwd, f.path, f.size, &bucket, key, false)?;
+                    }
+                }
+                if self.args.delete {
+                    for (_, d) in dests {
+                        plan.push(
+                            Shown {
+                                kind: "delete",
+                                src: format!("s3://{bucket}/{}", d.key),
+                                dest: None,
+                            },
+                            Transfer::Delete {
+                                bucket: bucket.clone(),
+                                key: d.key,
+                            },
+                        );
+                    }
+                }
+            }
+            Direction::Download => {
+                let (bucket, mut prefix) = bucket_key(&src);
+                with_slash(&mut prefix);
+                let local = cwd.join(&dest);
+                let sources = self.list_objects(&bucket, &prefix)?;
+                let mut dests: std::collections::BTreeMap<String, LocalFile> = if local.is_dir() {
+                    self.list_local(&local)
+                        .into_iter()
+                        .map(|f| (f.rel.clone(), f))
+                        .collect()
+                } else {
+                    Default::default()
+                };
+                for o in sources {
+                    let rel = o.key[prefix.len()..].to_string();
+                    let wanted = match dests.remove(&rel) {
+                        None => true,
+                        Some(d) => self.should_sync(o.size, o.last_modified, d.size, d.mtime, true),
+                    };
+                    if wanted {
+                        self.plan_download(&mut plan, &cwd, &local, &rel, &bucket, o, false);
+                    }
+                }
+                if self.args.delete {
+                    for (_, d) in dests {
+                        plan.push(
+                            Shown {
+                                kind: "delete",
+                                src: display_local(&d.path, &cwd),
+                                dest: None,
+                            },
+                            Transfer::DeleteLocal { path: d.path },
+                        );
+                    }
+                }
+            }
+            Direction::Copy => {
+                let (src_bucket, mut src_prefix) = bucket_key(&src);
+                let (bucket, mut prefix) = bucket_key(&dest);
+                with_slash(&mut src_prefix);
+                with_slash(&mut prefix);
+                let extra = self.copy_extra_args()?;
+                let sources = self.list_objects(&src_bucket, &src_prefix)?;
+                let dests = self.list_objects(&bucket, &prefix)?;
+                let mut dests: std::collections::BTreeMap<String, Obj> = dests
+                    .into_iter()
+                    .map(|o| (o.key[prefix.len()..].to_string(), o))
+                    .collect();
+                for o in sources {
+                    let rel = o.key[src_prefix.len()..].to_string();
+                    let wanted = match dests.remove(&rel) {
+                        None => true,
+                        Some(d) => self.should_sync(
+                            o.size,
+                            o.last_modified,
+                            d.size,
+                            d.last_modified,
+                            false,
+                        ),
+                    };
+                    if wanted {
+                        let dest_key = format!("{prefix}{rel}");
+                        plan.push(
+                            Shown {
+                                kind: "copy",
+                                src: format!("s3://{src_bucket}/{}", o.key),
+                                dest: Some(format!("s3://{bucket}/{dest_key}")),
+                            },
+                            Transfer::Copy {
+                                src_bucket: src_bucket.clone(),
+                                src_key: o.key,
+                                size: Some(o.size),
+                                bucket: bucket.clone(),
+                                key: dest_key,
+                                extra: extra.clone(),
+                                delete_source: false,
+                            },
+                        );
+                    }
+                }
+                if self.args.delete {
+                    for (_, d) in dests {
+                        plan.push(
+                            Shown {
+                                kind: "delete",
+                                src: format!("s3://{bucket}/{}", d.key),
+                                dest: None,
+                            },
+                            Transfer::Delete {
+                                bucket: bucket.clone(),
+                                key: d.key,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        self.execute(plan.transfers, plan.shown)
+    }
+
+    /// The default `SizeAndLastModifiedSync` (or `--size-only`,
+    /// `--exact-timestamps`): whether a file present at both ends is sent.
+    fn should_sync(
+        &self,
+        src_size: u64,
+        src_time: Option<DateTime<Utc>>,
+        dest_size: u64,
+        dest_time: Option<DateTime<Utc>>,
+        download: bool,
+    ) -> bool {
+        if src_size != dest_size {
+            return true;
+        }
+        if self.args.size_only {
+            return false;
+        }
+        let (Some(src), Some(dest)) = (src_time, dest_time) else {
+            return true;
+        };
+        let delta = (dest - src).num_microseconds().unwrap_or(i64::MAX);
+        let same_time = if !download {
+            // Upload / copy: the destination is at least as new.
+            delta >= 0
+        } else if self.args.exact_timestamps {
+            delta == 0
+        } else {
+            // Download: only a newer local file counts as different.
+            delta <= 0
+        };
+        !same_time
+    }
+
+    fn direction(&self, src: &str, dest: &str, usage: &str) -> Result<Direction, Failure> {
+        match (src.starts_with("s3://"), dest.starts_with("s3://")) {
+            (false, true) => Ok(Direction::Upload),
+            (true, false) => Ok(Direction::Download),
+            (true, true) => Ok(Direction::Copy),
+            (false, false) => Err(Failure::usage(format!(
+                "usage: aws s3 {usage}\nError: Invalid argument type"
+            ))),
+        }
+    }
+
+    /// Files below a local directory, filtered relative to it.
+    fn list_local(&self, root: &Path) -> Vec<LocalFile> {
+        let filters = Filters::new(&self.args.filters, &format!("{}/", root.display()));
+        let mut files = Vec::new();
+        walk(root, &mut files);
+        files
+            .into_iter()
+            .filter(|(path, _, _)| filters.allows(&path.to_string_lossy()))
+            .map(|(path, size, mtime)| LocalFile {
+                rel: path
+                    .strip_prefix(root)
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default(),
+                path,
+                size,
+                mtime,
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_upload(
+        &self,
+        plan: &mut Plan,
+        cwd: &Path,
+        path: PathBuf,
+        size: u64,
+        bucket: &str,
+        key: String,
+        is_move: bool,
+    ) -> Result<(), Failure> {
+        plan.push(
+            Shown {
+                kind: kind("upload", is_move),
+                src: display_local(&path, cwd),
+                dest: Some(format!("s3://{bucket}/{key}")),
+            },
+            Transfer::Upload {
+                extra: self.extra_args(Some(&path))?,
+                path,
+                bucket: bucket.to_string(),
+                key,
+                size,
+                delete_source: is_move,
+            },
+        );
+        Ok(())
+    }
+
+    /// A download of an object listed below a prefix, unless it is a
+    /// directory marker or would leave the destination directory.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_download(
+        &mut self,
+        plan: &mut Plan,
+        cwd: &Path,
+        dest_dir: &Path,
+        rel: &str,
+        bucket: &str,
+        o: Obj,
+        is_move: bool,
+    ) {
+        if o.key.ends_with('/') {
+            return;
+        }
+        let Some(path) = local_path_for(dest_dir, rel) else {
+            self.warn(format!(
+                "warning: Skipping file {rel}. File references a parent directory."
+            ));
+            return;
+        };
+        plan.push(
+            Shown {
+                kind: kind("download", is_move),
+                src: format!("s3://{bucket}/{}", o.key),
+                dest: Some(display_local(&path, cwd)),
+            },
+            Transfer::Download {
+                bucket: bucket.to_string(),
+                key: o.key,
+                size: Some(o.size),
+                last_modified: o.last_modified,
+                path,
+                delete_source: is_move,
+            },
+        );
+    }
+
+    /// Copies replace the metadata when the command sets any
+    /// (`map_copy_object_params`).
+    fn copy_extra_args(&self) -> Result<Map, Failure> {
+        let mut extra = self.extra_args(None)?;
+        if extra.contains_key("Metadata") || extra.contains_key("ContentType") {
+            extra.insert("MetadataDirective".into(), Value::Str("REPLACE".into()));
+        }
+        Ok(extra)
     }
 }
 
-/// Regular files below `dir` (following symlinks), sorted by path.
-fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
+/// An object from a listing.
+struct Obj {
+    key: String,
+    size: u64,
+    last_modified: Option<DateTime<Utc>>,
+}
+
+/// A local file below a sync / recursive root.
+struct LocalFile {
+    /// Path relative to the root, `/`-separated.
+    rel: String,
+    path: PathBuf,
+    size: u64,
+    mtime: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Upload,
+    Download,
+    Copy,
+}
+
+/// Transfers and how each one is shown.
+#[derive(Default)]
+struct Plan {
+    transfers: Vec<Transfer>,
+    shown: Vec<Shown>,
+}
+
+impl Plan {
+    fn push(&mut self, shown: Shown, transfer: Transfer) {
+        self.shown.push(shown);
+        self.transfers.push(transfer);
+    }
+}
+
+/// `mv` reports every transfer as `move`.
+fn kind(base: &'static str, is_move: bool) -> &'static str {
+    if is_move { "move" } else { base }
+}
+
+fn with_slash(prefix: &mut String) {
+    if !prefix.is_empty() && !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+}
+
+/// Regular files below `dir` (following symlinks), sorted by path, with
+/// size and modification time.
+fn walk(dir: &Path, out: &mut Vec<WalkEntry>) {
     walk_inner(dir, out, &mut Vec::new());
 }
 
+type WalkEntry = (PathBuf, u64, Option<DateTime<Utc>>);
+
 /// `seen`: canonical directories on the current path, so a symlink loop is
 /// not followed forever.
-fn walk_inner(dir: &Path, out: &mut Vec<(PathBuf, u64)>, seen: &mut Vec<PathBuf>) {
+fn walk_inner(dir: &Path, out: &mut Vec<WalkEntry>, seen: &mut Vec<PathBuf>) {
     let Ok(canonical) = std::fs::canonicalize(dir) else {
         return;
     };
@@ -1016,7 +1394,10 @@ fn walk_inner(dir: &Path, out: &mut Vec<(PathBuf, u64)>, seen: &mut Vec<PathBuf>
         for p in paths {
             match std::fs::metadata(&p) {
                 Ok(m) if m.is_dir() => walk_inner(&p, out, seen),
-                Ok(m) if m.is_file() => out.push((p, m.len())),
+                Ok(m) if m.is_file() => {
+                    let mtime = m.modified().ok().map(DateTime::<Utc>::from);
+                    out.push((p, m.len(), mtime));
+                }
                 _ => {}
             }
         }
