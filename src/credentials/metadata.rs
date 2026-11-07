@@ -20,12 +20,15 @@ const CONTAINER_ALLOWED_HOSTS: &[&str] = &[
 const CONTAINER_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTAINER_ATTEMPTS: usize = 3;
 
+const METADATA_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const IMDS_BASE: &str = "http://169.254.169.254";
 const IMDS_TIMEOUT: Duration = Duration::from_secs(1);
 const IMDS_ROLE_PATH: &str = "/latest/meta-data/iam/security-credentials/";
 
 fn send(ctx: &Context, mut req: Request, timeout: Duration) -> Option<Response> {
     req.timeout = Some(timeout);
+    // Credential documents are tiny.
+    req.max_response_bytes = Some(METADATA_MAX_RESPONSE_BYTES);
     req.set_header("User-Agent", crate::client::USER_AGENT);
     ctx.transport.send(&req).ok()
 }

@@ -138,6 +138,8 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - 認証情報が何も無い環境では、本家と同様に IMDS へ問い合わせるため約 1 秒かかる。
 - チェックサムの XXHASH3 / XXHASH128 は未実装 (本家は awscrt)。指定すると `Unsupported checksum algorithm` になり、レスポンス検証では次の優先度のアルゴリズムを使う。
 - aws-chunked トレーラ付きの送信は、本文をメモリに持つため `Transfer-Encoding: chunked` ではなくエンコード後の `Content-Length` で送る (S3 はどちらも受け付ける)。
+- HTTP のリダイレクトはたどらない (botocore と同じく 3xx は応答として扱う)。ureq に任せると `X-Amz-Security-Token` などがリダイレクト先ホストへ送られるため (oss-scan 指摘)。
+- 応答本文の上限: 通常の API 応答 512 MiB、IMDS / コンテナ認証情報 1 MiB。超えたらリトライせずエラー。ストリーミング出力 (`get-object` の outfile, event stream) は上限なしでメモリに読む (Transport のストリーミング化までの制限)。
 - HTTP 本文はメモリに読み切る。`s3api get-object` の `outfile` や event stream は応答全体を受け取ってから処理するため、`logs start-live-tail` のような終わりの無いストリームは扱えない (`start-live-tail` 自体も未実装)。
 - 本家 CLI が削除している event stream 操作 (`lambda invoke-with-response-stream`, `bedrock-runtime converse-stream` など) も表示され、イベントの一覧を JSON で出力する。
 - `--no-verify-ssl`, `--ca-bundle`, `--cli-error-format` は受け付けるが効果がない。

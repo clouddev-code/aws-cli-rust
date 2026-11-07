@@ -346,6 +346,14 @@ impl<'a> Client<'a> {
             base.set_header(name, joined);
         }
         base.set_header("User-Agent", USER_AGENT);
+        // Streaming payloads are still read into memory as a whole.
+        let streaming = op.streaming_output_member().is_some()
+            || op
+                .output()
+                .is_some_and(|o| o.event_stream_member().is_some());
+        if streaming {
+            base.max_response_bytes = Some(u64::MAX);
+        }
         let request_checksum = self.request_checksum(&op, params, &base)?;
         let signing = match &self.credentials {
             Some(_) if !is_unsigned(&op) => Some(self.signing_context(&op, &endpoint.properties)?),
@@ -419,13 +427,19 @@ impl<'a> Client<'a> {
             }
             let outcome = sent
                 .map_err(|e| {
+                    if e.is_body_limit() {
+                        return (
+                            ClientError::Transport(format!("{e}: \"{}\"", req.url())),
+                            None,
+                        );
+                    }
                     let timeout = e.is_timeout();
                     (
                         ClientError::Transport(format!(
                             "Could not connect to the endpoint URL: \"{}\": {e}",
                             req.url()
                         )),
-                        timeout,
+                        Some(timeout),
                     )
                 })
                 .map(|resp| {
@@ -434,7 +448,8 @@ impl<'a> Client<'a> {
                 });
             let delay = match &outcome {
                 _ if retry.mode == RetryMode::Legacy || attempt >= retry.max_attempts => None,
-                Err((_, timeout)) => self.retry_delay(attempt, *timeout),
+                Err((_, None)) => None,
+                Err((_, Some(timeout))) => self.retry_delay(attempt, *timeout),
                 Ok((resp, parsed)) => {
                     let code = match parsed {
                         Err(ClientError::Service(e)) => Some(e.code.as_str()),
