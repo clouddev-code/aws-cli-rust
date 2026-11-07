@@ -83,7 +83,8 @@ fn run_inner(
     if globals.version {
         let _ = writeln!(
             out,
-            "aws-cli-rust/{VERSION} (awsr; data-driven port of aws-cli v2)"
+            "aws-cli-rust/{VERSION} (awsr; data-driven port of aws-cli v2; models from aws-cli {})",
+            env!("AWSR_UPSTREAM_TAG")
         );
         return Ok(());
     }

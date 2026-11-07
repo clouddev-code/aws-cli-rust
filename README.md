@@ -18,11 +18,20 @@ botocore のサービスモデル (`service-2.json` ほか) をそのまま読�
 
 `cargo build --no-default-features` で埋め込みなしのバイナリになります (3 と 4 を使う)。
 
-開発用チェックアウトの取得 (fish):
+開発用チェックアウトの取得 (`upstream.lock` に記録した aws-cli のリリースを取得します):
 
 ```fish
-git clone --depth 1 https://github.com/aws/aws-cli reference/aws-cli
+make fetch-upstream
 ```
+
+本家の新しいリリースへの追従:
+
+```fish
+make update-upstream            # 最新の 2.x.y へ (TAG=2.x.y で指定も可)。テストまで実行
+./target/release/awsr --version # 埋め込んだモデルの元のリリースを表示
+```
+
+GitHub Actions の `upstream-sync` が毎週月曜に最新リリースを確認し、新しければ `upstream.lock` を更新してテストし、変更の要約 (サービス・オペレーションの増減、CHANGELOG) を付けた PR を作ります。
 
 ## ビルドとテスト
 
