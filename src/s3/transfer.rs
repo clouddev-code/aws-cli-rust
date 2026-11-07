@@ -35,6 +35,9 @@ impl Default for TransferConfig {
     }
 }
 
+/// Extra response bytes accepted beyond the expected object size.
+const GET_SLACK: u64 = 1024 * 1024;
+
 /// S3's limit on parts per upload (s3transfer `MAX_PARTS`).
 const MAX_PARTS: u64 = 10_000;
 
@@ -104,6 +107,13 @@ pub fn error_text(e: &ClientError, op: &str) -> String {
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())
+}
+
+/// `CopySource` as botocore sends it (`handle_copy_source_param`): the key
+/// percent-encoded except `/` and `~`, so `?`, `#` or spaces in a key are
+/// not read as a version id or another object.
+fn copy_source(bucket: &str, key: &str) -> Value {
+    Value::Str(format!("{bucket}/{}", crate::util::quote(key, "/~")))
 }
 
 /// State shared by the parts of one multipart transfer.
@@ -178,12 +188,25 @@ struct Engine<'c, 'a> {
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Download into `<dest>.<suffix>` and rename on success, like s3transfer.
-fn temp_path(dest: &std::path::Path) -> PathBuf {
-    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut name = dest.as_os_str().to_owned();
-    name.push(format!(".awsr{}{n:x}", std::process::id()));
-    PathBuf::from(name)
+/// Create `<dest>.<suffix>` exclusively (never following or reusing an
+/// existing file or link); downloads are written there and renamed on
+/// success, like s3transfer.
+fn create_temp(dest: &std::path::Path) -> Result<(PathBuf, File), String> {
+    loop {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut name = dest.as_os_str().to_owned();
+        name.push(format!(".awsr{}{n:x}", std::process::id()));
+        let path = PathBuf::from(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io_error(e, &path)),
+        }
+    }
 }
 
 fn io_error(e: std::io::Error, path: &std::path::Path) -> String {
@@ -201,6 +224,21 @@ impl Engine<'_, '_> {
         self.client
             .call(op, &Value::Map(params), None, log)
             .map_err(|e| error_text(&e, op))
+    }
+
+    /// A GetObject whose body may be at most `expected` bytes (plus slack
+    /// for an object that grew since it was listed).
+    fn get(&self, params: Map, expected: u64, log: &mut Vec<u8>) -> Result<Vec<u8>, String> {
+        let mut sink = std::io::sink();
+        let log: &mut dyn Write = if self.debug { log } else { &mut sink };
+        let resp = self
+            .client
+            .call_with_limit("GetObject", &Value::Map(params), expected + GET_SLACK, log)
+            .map_err(|e| error_text(&e, "GetObject"))?;
+        Ok(match resp.get("Body") {
+            Some(Value::Bytes(b)) => b.clone(),
+            _ => Vec::new(),
+        })
     }
 
     fn checksums(&self) -> bool {
@@ -284,21 +322,15 @@ impl Engine<'_, '_> {
                     let mut params = Map::new();
                     params.insert("Bucket".into(), s(bucket));
                     params.insert("Key".into(), s(key));
-                    let resp = self.call("GetObject", params, log)?;
-                    let body = match resp.get("Body") {
-                        Some(Value::Bytes(b)) => b.clone(),
-                        _ => Vec::new(),
-                    };
+                    let body = self.get(params, size, log)?;
                     write_new_file(path, &body)?;
                     return Ok(Started::Done);
                 }
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                     std::fs::create_dir_all(parent).map_err(|e| io_error(e, parent))?;
                 }
-                let temp = temp_path(path);
-                File::create(&temp)
-                    .and_then(|f| f.set_len(size))
-                    .map_err(|e| io_error(e, &temp))?;
+                let (temp, file) = create_temp(path)?;
+                file.set_len(size).map_err(|e| io_error(e, &temp))?;
                 self.split(i, String::new(), Some(temp), size);
                 Ok(Started::Split)
             }
@@ -318,10 +350,12 @@ impl Engine<'_, '_> {
                 params.insert("Bucket".into(), s(bucket));
                 params.insert("Key".into(), s(key));
                 if size < self.config.multipart_threshold {
-                    params.insert("CopySource".into(), s(&format!("{src_bucket}/{src_key}")));
+                    params.insert("CopySource".into(), copy_source(src_bucket, src_key));
                     self.call("CopyObject", params, log)?;
                     return Ok(Started::Done);
                 }
+                // `CREATE_MULTIPART_ARGS_BLACKLIST`: CopyObject-only settings.
+                params.shift_remove("MetadataDirective");
                 if self.checksums() {
                     params.insert("ChecksumAlgorithm".into(), s("CRC64NVME"));
                 }
@@ -422,7 +456,7 @@ impl Engine<'_, '_> {
                 params.insert("Key".into(), s(key));
                 params.insert("UploadId".into(), s(&mp.upload_id));
                 params.insert("PartNumber".into(), number.clone());
-                params.insert("CopySource".into(), s(&format!("{src_bucket}/{src_key}")));
+                params.insert("CopySource".into(), copy_source(src_bucket, src_key));
                 params.insert(
                     "CopySourceRange".into(),
                     s(&format!("bytes={start}-{}", start + len - 1)),
@@ -454,11 +488,7 @@ impl Engine<'_, '_> {
                     "Range".into(),
                     s(&format!("bytes={start}-{}", start + len - 1)),
                 );
-                let resp = self.call("GetObject", params, log)?;
-                let body = match resp.get("Body") {
-                    Some(Value::Bytes(b)) => b.clone(),
-                    _ => Vec::new(),
-                };
+                let body = self.get(params, len, log)?;
                 if body.len() as u64 != len {
                     return Err(format!(
                         "expected {len} bytes for range starting at {start}, got {}",
@@ -523,8 +553,12 @@ fn write_new_file(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| io_error(e, parent))?;
     }
-    let temp = temp_path(path);
-    std::fs::write(&temp, body).map_err(|e| io_error(e, &temp))?;
+    let (temp, mut file) = create_temp(path)?;
+    file.write_all(body).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        io_error(e, &temp)
+    })?;
+    drop(file);
     std::fs::rename(&temp, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         io_error(e, path)

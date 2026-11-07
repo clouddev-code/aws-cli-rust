@@ -277,16 +277,24 @@ fn relpath(path: &Path, start: &Path) -> String {
 }
 
 /// A local path for a key below a prefix, or `None` when the key would
-/// leave the destination directory (`_warn_parent_reference`).
+/// leave the destination directory (`_warn_parent_reference`). Keys are
+/// split on `/` (and the platform separator); every remaining component
+/// must be a plain file name.
 fn local_path_for(dest_dir: &Path, relative_key: &str) -> Option<PathBuf> {
     let mut parts: Vec<&str> = Vec::new();
-    for c in relative_key.split('/') {
+    for c in relative_key.split(['/', std::path::MAIN_SEPARATOR]) {
         match c {
             "" | "." => {}
             ".." => {
                 parts.pop()?;
             }
-            c => parts.push(c),
+            c => {
+                let mut comps = Path::new(c).components();
+                match (comps.next(), comps.next()) {
+                    (Some(std::path::Component::Normal(_)), None) => parts.push(c),
+                    _ => return None,
+                }
+            }
         }
     }
     if parts.is_empty() {
@@ -294,7 +302,7 @@ fn local_path_for(dest_dir: &Path, relative_key: &str) -> Option<PathBuf> {
     }
     let mut out = dest_dir.to_path_buf();
     out.extend(parts);
-    Some(out)
+    out.starts_with(dest_dir).then_some(out)
 }
 
 /// Entry point for `awsr s3 ...` (tokens after `s3`). Returns the exit
@@ -935,7 +943,12 @@ impl S3<'_, '_> {
             _ => {
                 let (src_bucket, mut src_key) = bucket_key(&src);
                 let (bucket, mut key) = bucket_key(&dest);
-                let extra = self.extra_args(None)?;
+                let mut extra = self.extra_args(None)?;
+                // S3 keeps the source's metadata unless told to replace it
+                // (`map_copy_object_params`).
+                if extra.contains_key("Metadata") || extra.contains_key("ContentType") {
+                    extra.insert("MetadataDirective".into(), Value::Str("REPLACE".into()));
+                }
                 if self.args.recursive {
                     for k in [&mut src_key, &mut key] {
                         if !k.is_empty() && !k.ends_with('/') {
@@ -984,18 +997,31 @@ impl S3<'_, '_> {
 
 /// Regular files below `dir` (following symlinks), sorted by path.
 fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    walk_inner(dir, out, &mut Vec::new());
+}
+
+/// `seen`: canonical directories on the current path, so a symlink loop is
+/// not followed forever.
+fn walk_inner(dir: &Path, out: &mut Vec<(PathBuf, u64)>, seen: &mut Vec<PathBuf>) {
+    let Ok(canonical) = std::fs::canonicalize(dir) else {
         return;
     };
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-    for p in paths {
-        match std::fs::metadata(&p) {
-            Ok(m) if m.is_dir() => walk(&p, out),
-            Ok(m) if m.is_file() => out.push((p, m.len())),
-            _ => {}
+    if seen.contains(&canonical) {
+        return;
+    }
+    seen.push(canonical);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            match std::fs::metadata(&p) {
+                Ok(m) if m.is_dir() => walk_inner(&p, out, seen),
+                Ok(m) if m.is_file() => out.push((p, m.len())),
+                _ => {}
+            }
         }
     }
+    seen.pop();
 }
 
 /// A service error from `ls` / `presign`: awscli's usual error (254).

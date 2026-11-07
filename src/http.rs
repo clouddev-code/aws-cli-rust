@@ -133,6 +133,11 @@ impl Response {
 pub struct TransportError(pub String);
 
 impl TransportError {
+    /// The error for a body over `limit` bytes.
+    pub fn body_limit(limit: u64) -> Self {
+        TransportError(format!("{BODY_LIMIT_MESSAGE} {limit} bytes"))
+    }
+
     /// The response exceeded `max_response_bytes`; retrying would not help.
     pub fn is_body_limit(&self) -> bool {
         self.0.starts_with(BODY_LIMIT_MESSAGE)
@@ -233,9 +238,7 @@ impl Transport for UreqTransport {
             .limit(limit)
             .read_to_vec()
             .map_err(|e| match e {
-                ureq::Error::BodyExceedsLimit(_) => {
-                    TransportError(format!("{BODY_LIMIT_MESSAGE} {limit} bytes"))
-                }
+                ureq::Error::BodyExceedsLimit(_) => TransportError::body_limit(limit),
                 e => TransportError(e.to_string()),
             })?;
         Ok(Response {

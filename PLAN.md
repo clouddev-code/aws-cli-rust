@@ -127,7 +127,8 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - カスタマイズコマンド (`configure`, `ec2 run-instances --count` など) は未実装 (`login` / `sso login` / `sso logout` / `aws s3` の一部は実装済み)。
 - `aws s3`: mv / sync / website は未実装。cp の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
 - `aws s3`: レンジ GET による分割ダウンロードでは、本家のようなパートの CRC を結合した全体チェックサムの照合はしない (206 応答のチェックサム検証は省略)。Content-Type の推測は Python 組み込みの mimetypes 表 (システムの mime.types は読まない) を使う。
-- `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。
+- `aws s3 cp` の S3 間コピー: `--copy-props` は未対応。マルチパートコピー (`multipart_threshold` 以上) ではコピー元のメタデータを引き継がない (s3transfer 単体と同じ。本家 awscli は既定でコピー元の HeadObject から引き継ぐ)。
+- `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。応答本文も、オブジェクトやレンジの期待サイズ + 1 MiB を上限にする。
 - 改名・非表示は `argrename.py`, `removals.py`, `signin.py`, `cloudwatch.py`, `kinesis.py`, ページング (入力トークンの非表示) を反映済み。独自コマンドを作るカスタマイズ (`rds add-option-to-option-group` / `remove-option-from-option-group`, `ses send-email`, `ec2 authorize-security-group-ingress` の簡易引数など) は未実装で、元のオペレーションのまま使う。メンバー名がグローバル引数と同じ場合 (改名表に無いもの) はグローバル側が優先される。
 - S3 Express (CreateSession によるセッション認証) は未対応。
 - リトライ: `standard` は本家 (AWS_NEW_RETRIES_2026 未設定時) と同じ。`adaptive` はクライアント側のレート制限が無く `standard` と同じ動作。`legacy` は本家 v2 と同じくリトライしない。`amz-sdk-request` の `ttl` は送らない。

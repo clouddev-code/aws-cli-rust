@@ -311,6 +311,19 @@ impl<'a> Client<'a> {
             .map(|r| r.value)
     }
 
+    /// [`Client::call`] accepting at most `max_response_bytes` of response
+    /// body: S3 transfers know the size of each object or range they get.
+    pub fn call_with_limit(
+        &self,
+        op_name: &str,
+        params: &Value,
+        max_response_bytes: u64,
+        log: &mut dyn Write,
+    ) -> Result<Value, ClientError> {
+        self.send(op_name, params, None, Some(max_response_bytes), log)
+            .map(|r| r.value)
+    }
+
     /// Like [`Client::call`], also returning the HTTP status (waiters match
     /// on it). Retryable failures are retried per the retry mode
     /// (botocore `endpoint._send_request` + `retries/standard.py`).
@@ -319,6 +332,17 @@ impl<'a> Client<'a> {
         op_name: &str,
         params: &Value,
         before_send: Option<&dyn Fn(&mut Request)>,
+        log: &mut dyn Write,
+    ) -> Result<Reply, ClientError> {
+        self.send(op_name, params, before_send, None, log)
+    }
+
+    fn send(
+        &self,
+        op_name: &str,
+        params: &Value,
+        before_send: Option<&dyn Fn(&mut Request)>,
+        max_response_bytes: Option<u64>,
         log: &mut dyn Write,
     ) -> Result<Reply, ClientError> {
         let op = self
@@ -350,6 +374,9 @@ impl<'a> Client<'a> {
                 .is_some_and(|o| o.event_stream_member().is_some());
         if streaming {
             base.max_response_bytes = Some(u64::MAX);
+        }
+        if max_response_bytes.is_some() {
+            base.max_response_bytes = max_response_bytes;
         }
         let request_checksum = self.request_checksum(&op, params, &base)?;
         let signing = match &self.credentials {

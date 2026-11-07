@@ -21,7 +21,15 @@ struct FakeS3 {
 impl Transport for FakeS3 {
     fn send(&self, req: &Request) -> Result<Response, TransportError> {
         self.requests.lock().unwrap().push(req.clone());
-        Ok((self.handler)(req))
+        let resp = (self.handler)(req);
+        // Enforce the body limit the way UreqTransport does.
+        let limit = req
+            .max_response_bytes
+            .unwrap_or(awsr::http::DEFAULT_MAX_RESPONSE_BYTES);
+        if resp.body.len() as u64 > limit {
+            return Err(TransportError::body_limit(limit));
+        }
+        Ok(resp)
     }
 }
 
@@ -461,4 +469,199 @@ fn presign_matches_botocore() {
     // region and clock); see tests/fixtures/s3/generate_presign.py.
     let expected = std::fs::read_to_string(common::fixtures().join("s3/presign.txt")).unwrap();
     assert_eq!(r.stdout, expected);
+}
+
+/// Handler wrapper that records the highest number of requests in flight.
+fn concurrency_probe(
+    inner: impl Fn(&Request) -> Response + Send + Sync + 'static,
+) -> (Handler, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+    let max = std::sync::Arc::new(AtomicUsize::new(0));
+    let (f, m) = (in_flight.clone(), max.clone());
+    let handler: Handler = Box::new(move |req| {
+        let now = f.fetch_add(1, Ordering::SeqCst) + 1;
+        m.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let resp = inner(req);
+        f.fetch_sub(1, Ordering::SeqCst);
+        resp
+    });
+    (handler, max)
+}
+
+#[test]
+fn transfers_and_parts_run_in_parallel() {
+    use std::sync::atomic::Ordering;
+    let (dir, rel) = scratch("concurrency");
+    for i in 0..8 {
+        std::fs::write(dir.join(format!("f{i}")), b"x").unwrap();
+    }
+    let config = "[default]\nregion = us-east-1\ns3 =\n  max_concurrent_requests = 4\n";
+    let (handler, max) = concurrency_probe(|_| ok(""));
+    let Some(r) = run_s3(&["cp", &rel, "s3://bkt/", "--recursive"], config, handler) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        max.load(Ordering::SeqCst) > 1,
+        "files were sent one at a time"
+    );
+
+    // Parts of one object.
+    let (dir, rel) = scratch("concurrency-parts");
+    std::fs::write(dir.join("big.bin"), vec![0u8; 21 * 1024 * 1024]).unwrap();
+    let (handler, max) = concurrency_probe(|req| {
+        if query(req, "uploads").is_some() {
+            ok(
+                "<InitiateMultipartUploadResult><UploadId>U</UploadId></InitiateMultipartUploadResult>",
+            )
+        } else if query(req, "partNumber").is_some() {
+            Response {
+                status: 200,
+                headers: vec![("ETag".into(), "\"e\"".into())],
+                body: vec![],
+            }
+        } else {
+            ok("<CompleteMultipartUploadResult/>")
+        }
+    });
+    let src = format!("{rel}/big.bin");
+    let r = run_s3(&["cp", &src, "s3://bkt/big.bin"], config, handler).unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let parts = r
+        .requests
+        .iter()
+        .filter(|q| query(q, "partNumber").is_some())
+        .count();
+    assert_eq!(parts, 3);
+    assert!(
+        max.load(Ordering::SeqCst) > 1,
+        "parts were sent one at a time"
+    );
+}
+
+#[test]
+fn multipart_copy_encoding_and_limits() {
+    let size = 11 * 1024 * 1024;
+    let Some(r) = run_s3(
+        &[
+            "cp",
+            "s3://src/dir/a b?.txt",
+            "s3://dst/copy.txt",
+            "--content-type",
+            "text/csv",
+        ],
+        CONFIG,
+        Box::new(move |req| {
+            if req.method == "HEAD" {
+                Response {
+                    status: 200,
+                    headers: vec![("Content-Length".into(), size.to_string())],
+                    body: vec![],
+                }
+            } else if query(req, "uploads").is_some() {
+                ok(
+                    "<InitiateMultipartUploadResult><UploadId>C1</UploadId></InitiateMultipartUploadResult>",
+                )
+            } else if let Some(n) = query(req, "partNumber") {
+                ok(&format!(
+                    "<CopyPartResult><ETag>\"p{n}\"</ETag><ChecksumCRC64NVME>k{n}</ChecksumCRC64NVME></CopyPartResult>"
+                ))
+            } else {
+                ok("<CompleteMultipartUploadResult/>")
+            }
+        }),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.stdout,
+        "copy: s3://src/dir/a b?.txt to s3://dst/copy.txt\n"
+    );
+    let create = r
+        .requests
+        .iter()
+        .find(|q| query(q, "uploads").is_some())
+        .unwrap();
+    assert_eq!(create.header("Content-Type"), Some("text/csv"));
+    let parts: Vec<&Request> = r
+        .requests
+        .iter()
+        .filter(|q| query(q, "partNumber").is_some())
+        .collect();
+    assert_eq!(parts.len(), 2);
+    // The key is percent-encoded like botocore's handle_copy_source_param.
+    assert_eq!(
+        parts[0].header("x-amz-copy-source"),
+        Some("src/dir/a%20b%3F.txt")
+    );
+    assert_eq!(
+        parts[0].header("x-amz-copy-source-range"),
+        Some("bytes=0-8388607")
+    );
+    assert_eq!(
+        parts[1].header("x-amz-copy-source-range"),
+        Some("bytes=8388608-11534335")
+    );
+    let complete = String::from_utf8(r.requests.last().unwrap().body.clone()).unwrap();
+    assert!(
+        complete.contains(
+            "<ETag>\"p2\"</ETag><PartNumber>2</PartNumber><ChecksumCRC64NVME>k2</ChecksumCRC64NVME>"
+        ),
+        "{complete}"
+    );
+
+    // Small copies replace the metadata when asked to set it.
+    let r = run_s3(
+        &["cp", "s3://src/k", "s3://dst/k", "--metadata", "a=b"],
+        CONFIG,
+        Box::new(|req| match req.method.as_str() {
+            "HEAD" => Response {
+                status: 200,
+                headers: vec![("Content-Length".into(), "1".into())],
+                body: vec![],
+            },
+            _ => ok("<CopyObjectResult/>"),
+        }),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.requests[1].header("x-amz-metadata-directive"),
+        Some("REPLACE")
+    );
+    assert_eq!(r.requests[1].header("x-amz-meta-a"), Some("b"));
+
+    // A body larger than the object it claims to be is refused.
+    let (dir, rel) = scratch("limit");
+    let dest = format!("{rel}/out.bin");
+    let r = run_s3(
+        &["cp", "s3://bkt/small", &dest],
+        CONFIG,
+        Box::new(|req| match req.method.as_str() {
+            "HEAD" => Response {
+                status: 200,
+                headers: vec![("Content-Length".into(), "4".into())],
+                body: vec![],
+            },
+            _ => Response {
+                status: 200,
+                headers: vec![],
+                body: vec![0; 2 * 1024 * 1024],
+            },
+        }),
+    )
+    .unwrap();
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains("response body is larger than"),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        std::fs::read_dir(&dir).unwrap().next().is_none(),
+        "nothing written"
+    );
 }
