@@ -754,6 +754,19 @@ fn container_credentials() {
         r.requests.is_empty(),
         "nothing is sent to a disallowed host"
     );
+
+    // An allowed address in the userinfo is not the host.
+    let mut s = Setup::new(&home, "");
+    s.env.push((
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "http://169.254.170.2:x@evil.example.com/creds".into(),
+    ));
+    s.env
+        .push(("AWS_CONTAINER_AUTHORIZATION_TOKEN", "secret".into()));
+    let r = s.run(&["sts", "get-caller-identity"], vec![]).unwrap();
+    assert_eq!(r.code, 255);
+    assert!(r.stderr.contains("Unsupported host"), "{}", r.stderr);
+    assert!(r.requests.is_empty(), "the token is not sent");
 }
 
 #[test]
