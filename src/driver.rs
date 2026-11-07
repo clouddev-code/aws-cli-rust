@@ -65,7 +65,9 @@ pub fn run(ctx: &Context, argv: &[String], out: &mut dyn Write, err: &mut dyn Wr
     match run_inner(ctx, argv, out, err) {
         Ok(()) => exit::OK,
         Err(f) => {
-            let _ = writeln!(err, "{}", f.message);
+            if !f.message.is_empty() {
+                let _ = writeln!(err, "{}", f.message);
+            }
             f.code
         }
     }
@@ -105,6 +107,16 @@ fn run_inner(
             out,
         )
         .map_err(Failure::general);
+    }
+    if command == "s3" {
+        let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
+        return match crate::s3::run(ctx, &globals, &tokens, out, err)? {
+            0 => Ok(()),
+            code => Err(Failure {
+                code,
+                message: String::new(),
+            }),
+        };
     }
     if command == "login" {
         let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
@@ -551,7 +563,7 @@ fn setting(ctx: &Context, globals: &Globals, key: &str) -> Option<String> {
     ctx.config.get(&profile, key)
 }
 
-fn profile_name(ctx: &Context, globals: &Globals) -> String {
+pub(crate) fn profile_name(ctx: &Context, globals: &Globals) -> String {
     globals.profile.clone().unwrap_or_else(|| {
         (ctx.env)("AWS_PROFILE")
             .or_else(|| (ctx.env)("AWS_DEFAULT_PROFILE"))
@@ -645,6 +657,17 @@ fn build_client<'a>(
     model: &'a ServiceModel,
     op: &Operation,
 ) -> Result<Client<'a>, Failure> {
+    service_client(ctx, globals, model, client::is_unsigned(op))
+}
+
+/// A client for a service, with region, credentials and settings from the
+/// globals, environment and profile. `unsigned` skips credentials.
+pub(crate) fn service_client<'a>(
+    ctx: &'a Context<'a>,
+    globals: &Globals,
+    model: &'a ServiceModel,
+    unsigned: bool,
+) -> Result<Client<'a>, Failure> {
     let profile = profile_name(ctx, globals);
     if globals.profile.is_some() && ctx.config.profile(&profile).is_none() {
         return Err(Failure::config(format!(
@@ -656,7 +679,7 @@ fn build_client<'a>(
             "You must specify a region. You can also configure your region by running \"aws configure\".",
         )
     })?;
-    let unsigned = globals.no_sign_request || client::is_unsigned(op);
+    let unsigned = globals.no_sign_request || unsigned;
     let credentials = if unsigned {
         None
     } else {
@@ -783,7 +806,7 @@ fn emit(
     }
 }
 
-fn client_failure(e: ClientError, op_name: &str) -> Failure {
+pub(crate) fn client_failure(e: ClientError, op_name: &str) -> Failure {
     match e {
         ClientError::Service(s) => Failure {
             code: exit::SERVICE,

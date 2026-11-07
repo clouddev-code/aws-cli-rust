@@ -1,0 +1,1 @@
+https://bkt.s3.us-east-1.amazonaws.com/dir/my%20key.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F20150830%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20150830T123600Z&X-Amz-Expires=600&X-Amz-SignedHeaders=host&X-Amz-Signature=5ced33c86a7fc0c4a6fe3c73ce1047d8966ccd7d9389601768281454546fc750

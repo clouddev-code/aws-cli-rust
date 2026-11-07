@@ -1,5 +1,6 @@
 //! Everything the CLI needs from the outside world, gathered in one place so
 //! tests can swap in fakes (no network, fixed clock, fixed env and files).
+//! Everything is `Send + Sync` so transfers can share it across threads.
 
 use crate::config::SharedConfig;
 use crate::http::Transport;
@@ -9,28 +10,30 @@ use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub type EnvLookup<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
-pub type Prompt<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
+pub type EnvLookup<'a> = Box<dyn Fn(&str) -> Option<String> + Send + Sync + 'a>;
+pub type Prompt<'a> = Box<dyn Fn(&str) -> Option<String> + Send + Sync + 'a>;
 
 pub struct Context<'a> {
     pub loader: Loader,
     pub config: SharedConfig,
     pub env: EnvLookup<'a>,
     pub transport: &'a dyn Transport,
-    pub now: Box<dyn Fn() -> DateTime<Utc> + 'a>,
-    pub uuid: Box<dyn Fn() -> String + 'a>,
+    pub now: Box<dyn Fn() -> DateTime<Utc> + Send + Sync + 'a>,
+    pub uuid: Box<dyn Fn() -> String + Send + Sync + 'a>,
     /// Ask the user for a line of input (MFA codes). `None` if unavailable.
     pub prompt: Prompt<'a>,
-    pub sleep: Box<dyn Fn(Duration) + 'a>,
+    pub sleep: Box<dyn Fn(Duration) + Send + Sync + 'a>,
     /// Open a URL in a browser; returns false if that was not possible.
-    pub open_browser: Box<dyn Fn(&str) -> bool + 'a>,
+    pub open_browser: Box<dyn Fn(&str) -> bool + Send + Sync + 'a>,
     /// Whether stdout is a terminal (enables the pager and table colors).
     pub stdout_is_tty: bool,
+    /// Wall-clock time in the local time zone (`aws s3 ls` prints it).
+    pub local_time: Box<dyn Fn(DateTime<Utc>) -> chrono::NaiveDateTime + Send + Sync + 'a>,
     /// Terminal width for `--output table`; `None` when stdout is not a
     /// terminal (awscli then assumes 80 columns).
     pub terminal_width: Option<usize>,
     /// Cryptographically secure random bytes (PKCE, DPoP keys).
-    pub random: Box<dyn Fn(usize) -> Vec<u8> + 'a>,
+    pub random: Box<dyn Fn(usize) -> Vec<u8> + Send + Sync + 'a>,
     /// Starts the local OAuth redirect receiver (`login`, `sso login`).
     pub callback: CallbackFactory<'a>,
 }

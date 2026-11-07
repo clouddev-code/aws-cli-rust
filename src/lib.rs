@@ -22,6 +22,7 @@ pub mod oauth;
 pub mod output;
 pub mod paginate;
 pub mod protocol;
+pub mod s3;
 pub mod sigv4;
 pub mod skeleton;
 pub mod table;

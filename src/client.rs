@@ -205,40 +205,37 @@ fn retryable(op: &Operation, resp: &crate::http::Response, code: Option<&str>) -
     false
 }
 
-/// `RetryQuota`: a token bucket shared by the attempts of one client.
+/// `RetryQuota`: a token bucket shared by the attempts of one client (and
+/// by the threads of a transfer).
 #[derive(Debug)]
 struct RetryQuota {
-    available: std::cell::Cell<u32>,
-    /// Capacity taken by the last retry (`retry_quota_capacity`).
-    last: std::cell::Cell<u32>,
+    /// (available tokens, capacity taken by the last retry
+    /// = `retry_quota_capacity`)
+    state: std::sync::Mutex<(u32, u32)>,
 }
 
 impl RetryQuota {
     fn new() -> Self {
         RetryQuota {
-            available: std::cell::Cell::new(INITIAL_RETRY_TOKENS),
-            last: std::cell::Cell::new(0),
+            state: std::sync::Mutex::new((INITIAL_RETRY_TOKENS, 0)),
         }
     }
 
     fn acquire(&self, amount: u32) -> bool {
-        if amount > self.available.get() {
+        let mut s = self.state.lock().unwrap();
+        if amount > s.0 {
             return false;
         }
-        self.available.set(self.available.get() - amount);
-        self.last.set(amount);
+        *s = (s.0 - amount, amount);
         true
     }
 
     /// `release_retry_quota` after a 2xx response.
     fn release(&self, retried: bool) {
-        let amount = if retried {
-            self.last.get()
-        } else {
-            NO_RETRY_INCREMENT
-        };
-        let room = INITIAL_RETRY_TOKENS - self.available.get();
-        self.available.set(self.available.get() + amount.min(room));
+        let mut s = self.state.lock().unwrap();
+        let amount = if retried { s.1 } else { NO_RETRY_INCREMENT };
+        let room = INITIAL_RETRY_TOKENS - s.0;
+        s.0 += amount.min(room);
     }
 }
 
@@ -314,6 +311,19 @@ impl<'a> Client<'a> {
             .map(|r| r.value)
     }
 
+    /// [`Client::call`] accepting at most `max_response_bytes` of response
+    /// body: S3 transfers know the size of each object or range they get.
+    pub fn call_with_limit(
+        &self,
+        op_name: &str,
+        params: &Value,
+        max_response_bytes: u64,
+        log: &mut dyn Write,
+    ) -> Result<Value, ClientError> {
+        self.send(op_name, params, None, Some(max_response_bytes), log)
+            .map(|r| r.value)
+    }
+
     /// Like [`Client::call`], also returning the HTTP status (waiters match
     /// on it). Retryable failures are retried per the retry mode
     /// (botocore `endpoint._send_request` + `retries/standard.py`).
@@ -322,6 +332,17 @@ impl<'a> Client<'a> {
         op_name: &str,
         params: &Value,
         before_send: Option<&dyn Fn(&mut Request)>,
+        log: &mut dyn Write,
+    ) -> Result<Reply, ClientError> {
+        self.send(op_name, params, before_send, None, log)
+    }
+
+    fn send(
+        &self,
+        op_name: &str,
+        params: &Value,
+        before_send: Option<&dyn Fn(&mut Request)>,
+        max_response_bytes: Option<u64>,
         log: &mut dyn Write,
     ) -> Result<Reply, ClientError> {
         let op = self
@@ -353,6 +374,9 @@ impl<'a> Client<'a> {
                 .is_some_and(|o| o.event_stream_member().is_some());
         if streaming {
             base.max_response_bytes = Some(u64::MAX);
+        }
+        if max_response_bytes.is_some() {
+            base.max_response_bytes = max_response_bytes;
         }
         let request_checksum = self.request_checksum(&op, params, &base)?;
         let signing = match &self.credentials {
@@ -492,7 +516,8 @@ impl<'a> Client<'a> {
         params: &Value,
         resp: &crate::http::Response,
     ) -> Result<Value, ClientError> {
-        if resp.status < 300 {
+        // A ranged GET (206) carries no checksum of its part.
+        if resp.status < 300 && resp.status != 206 {
             self.validate_response_checksum(op, params, resp)?;
         }
         rparse::parse(op, resp).map_err(|e| match e {
@@ -519,6 +544,44 @@ impl<'a> Client<'a> {
         let rand = (u64::from_le_bytes(buf) >> 11) as f64 / (1u64 << 53) as f64;
         let base = 2f64.powi(attempt as i32 - 1).min(MAX_BACKOFF_SECS);
         Some(std::time::Duration::from_secs_f64(rand * base))
+    }
+
+    /// A presigned URL for an operation (`generate_presigned_url`): SigV4
+    /// query authentication valid for `expires_in` seconds.
+    pub fn presign_url(
+        &self,
+        op_name: &str,
+        params: &Value,
+        expires_in: u64,
+    ) -> Result<String, ClientError> {
+        let op = self
+            .model
+            .operation(op_name)
+            .map_err(|e| ClientError::Other(e.to_string()))?;
+        let endpoint = RuleSet::new(&self.rules, &self.partitions)
+            .resolve(&self.endpoint_params(&op, params))
+            .map_err(|e| ClientError::Endpoint(e.to_string()))?;
+        if let Some(input) = op.input() {
+            crate::validate::validate(params, &input).map_err(ClientError::Validation)?;
+        }
+        let mut req = ser::serialize(&op, params)
+            .map_err(|e| ClientError::Params(e.to_string()))?
+            .into_request(&endpoint.url);
+        let creds = self
+            .credentials
+            .as_ref()
+            .ok_or_else(|| ClientError::Other("Unable to locate credentials".into()))?;
+        let signing = self.signing_context(&op, &endpoint.properties)?;
+        let signer = Signer {
+            credentials: creds,
+            region: &signing.region,
+            service: &signing.name,
+            s3: signing.s3,
+            payload: None,
+            asymmetric: false,
+        };
+        signer.presign(&mut req, (self.ctx.now)(), expires_in);
+        Ok(req.url())
     }
 
     /// `scheme://host` of the endpoint an operation would be sent to

@@ -184,6 +184,7 @@ fn main() {
         open_browser: Box::new(open_browser),
         stdout_is_tty: std::io::stdout().is_terminal(),
         terminal_width: terminal_width(),
+        local_time: Box::new(|t| t.with_timezone(&chrono::Local).naive_local()),
         random: Box::new(awsr::oauth::os_random),
         callback: Box::new(awsr::oauth::LocalCallbackServer::bind),
     };

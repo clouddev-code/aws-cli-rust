@@ -57,6 +57,10 @@ set -x AWS_PROFILE dev
 ./target/release/awsr lambda list-functions --endpoint-url http://localhost:4566 --region us-east-1
 ./target/release/awsr login --profile console   # コンソールの認証情報でログイン (ブラウザが開く)
 ./target/release/awsr sso login --profile dev   # IAM Identity Center にログイン
+./target/release/awsr s3 ls s3://my-bucket/logs/ --human-readable --summarize
+./target/release/awsr s3 cp ./dist s3://my-bucket/site/ --recursive --exclude "*.map"
+./target/release/awsr s3 cp s3://my-bucket/big.iso .
+./target/release/awsr s3 presign s3://my-bucket/report.pdf --expires-in 600
 ./target/release/awsr ec2 describe-instances --output table
 ./target/release/awsr sts get-caller-identity --output yaml
 ./target/release/awsr ec2 wait instance-running --instance-ids i-1234567890abcdef0
@@ -94,6 +98,7 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - リトライ: standard モード (最大 3 回、指数バックオフ + ジッタ、リトライクォータ)。`retry_mode` / `max_attempts` (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`)
 - 自動ページング、`--max-items` / `--page-size` / `--starting-token`、`--no-paginate`
 - `wait` コマンド (waiters-2.json の全 waiter)
+- `aws s3`: ls / mb / rb / rm / presign / cp (`--recursive`、`--include` / `--exclude`、マルチパート・並列転送。`[profile] s3 =` の `max_concurrent_requests` / `multipart_threshold` / `multipart_chunksize`)
 - `--generate-cli-skeleton` (`input` / `yaml-input` / `output`)
 - 出力: json / text / table / yaml / yaml-stream / off、`--query` (JMESPath)、`--color` (table の色付け)
 - help: 本家の man ページと同じ構成 (説明、構文、オプション、グローバルオプション、例、出力)

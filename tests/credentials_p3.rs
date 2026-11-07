@@ -9,25 +9,25 @@ use awsr::driver::{self, Context};
 use awsr::http::{Request, Response, Transport, TransportError};
 use awsr::oauth::CallbackServer;
 use chrono::{TimeZone, Utc};
-use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Fixed clock: 2015-08-30T12:36:00Z (epoch 1440938160).
 const NOW: i64 = 1440938160;
 
 struct FakeTransport {
-    requests: RefCell<Vec<Request>>,
-    responses: RefCell<VecDeque<Response>>,
+    requests: Mutex<Vec<Request>>,
+    responses: Mutex<VecDeque<Response>>,
 }
 
 impl Transport for FakeTransport {
     fn send(&self, req: &Request) -> Result<Response, TransportError> {
-        self.requests.borrow_mut().push(req.clone());
+        self.requests.lock().unwrap().push(req.clone());
         self.responses
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .pop_front()
             .ok_or_else(|| TransportError("connection refused".into()))
     }
@@ -115,7 +115,7 @@ struct Setup<'a> {
 }
 
 struct FakeCallback {
-    opened: Rc<RefCell<Vec<String>>>,
+    opened: Arc<Mutex<Vec<String>>>,
     code: String,
 }
 
@@ -126,7 +126,8 @@ impl CallbackServer for FakeCallback {
     fn wait(&self) -> Result<Option<(String, String)>, String> {
         let url = self
             .opened
-            .borrow()
+            .lock()
+            .unwrap()
             .last()
             .cloned()
             .ok_or("browser was not opened")?;
@@ -154,8 +155,8 @@ impl<'a> Setup<'a> {
     fn run(&self, args: &[&str], responses: Vec<Response>) -> Option<Run> {
         let loader = common::loader_or_skip()?;
         let transport = FakeTransport {
-            requests: RefCell::new(Vec::new()),
-            responses: RefCell::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into()),
         };
         let mut env: HashMap<String, String> = self
             .env
@@ -163,9 +164,9 @@ impl<'a> Setup<'a> {
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect();
         env.insert("HOME".into(), self.home.0.to_string_lossy().into_owned());
-        let prompts = RefCell::new(Vec::new());
+        let prompts = Mutex::new(Vec::new());
         let answer = self.prompt_answer.map(str::to_string);
-        let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+        let opened: Arc<Mutex<Vec<String>>> = Arc::default();
         let (opened_cb, opened_browser) = (opened.clone(), opened.clone());
         let code = self.callback_code.map(str::to_string);
         let ctx = Context {
@@ -176,16 +177,17 @@ impl<'a> Setup<'a> {
             now: Box::new(|| Utc.timestamp_opt(NOW, 0).unwrap()),
             uuid: Box::new(|| "11111111-1111-4111-8111-111111111111".into()),
             prompt: Box::new(|p| {
-                prompts.borrow_mut().push(p.to_string());
+                prompts.lock().unwrap().push(p.to_string());
                 answer.clone()
             }),
             sleep: Box::new(|_| {}),
             open_browser: Box::new(move |url| {
-                opened_browser.borrow_mut().push(url.to_string());
+                opened_browser.lock().unwrap().push(url.to_string());
                 true
             }),
             stdout_is_tty: false,
             terminal_width: None,
+            local_time: Box::new(|t| t.naive_utc()),
             random: Box::new(|n| (0..n).map(|i| (i * 31 + 7) as u8).collect()),
             callback: Box::new(move |_| match &code {
                 Some(c) => Ok(Box::new(FakeCallback {
@@ -203,9 +205,9 @@ impl<'a> Setup<'a> {
             code,
             stdout: String::from_utf8(out).unwrap(),
             stderr: String::from_utf8(err).unwrap(),
-            requests: transport.requests.take(),
-            prompts: prompts.take(),
-            opened: opened.take(),
+            requests: std::mem::take(&mut *transport.requests.lock().unwrap()),
+            prompts: std::mem::take(&mut *prompts.lock().unwrap()),
+            opened: std::mem::take(&mut *opened.lock().unwrap()),
         })
     }
 }
@@ -824,8 +826,8 @@ fn pager_selection() {
         return;
     };
     let transport = FakeTransport {
-        requests: RefCell::new(Vec::new()),
-        responses: RefCell::new(VecDeque::new()),
+        requests: Mutex::new(Vec::new()),
+        responses: Mutex::new(VecDeque::new()),
     };
     let env: HashMap<&str, &str> = HashMap::from([("PAGER", "more")]);
     let ctx = Context {
@@ -840,6 +842,7 @@ fn pager_selection() {
         open_browser: Box::new(|_| false),
         stdout_is_tty: true,
         terminal_width: None,
+        local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),
         callback: Box::new(|_| Err("no callback in tests".into())),
     };
