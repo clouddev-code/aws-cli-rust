@@ -27,6 +27,8 @@ pub struct Context<'a> {
     pub open_browser: Box<dyn Fn(&str) -> bool + Send + Sync + 'a>,
     /// Whether stdout is a terminal (enables the pager and table colors).
     pub stdout_is_tty: bool,
+    /// Wall-clock time in the local time zone (`aws s3 ls` prints it).
+    pub local_time: Box<dyn Fn(DateTime<Utc>) -> chrono::NaiveDateTime + Send + Sync + 'a>,
     /// Terminal width for `--output table`; `None` when stdout is not a
     /// terminal (awscli then assumes 80 columns).
     pub terminal_width: Option<usize>,

@@ -105,6 +105,7 @@ fn test_context<'a>(
         open_browser: Box::new(|_| false),
         stdout_is_tty: false,
         terminal_width: None,
+        local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),
         callback: Box::new(|_| Err("no callback in tests".into())),
     }

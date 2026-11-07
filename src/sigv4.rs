@@ -122,7 +122,22 @@ impl Signer<'_> {
             "{algorithm}\n{timestamp}\n{scope}\n{}",
             hex::encode(Sha256::digest(canonical_request.as_bytes()))
         );
-        let signature = if self.asymmetric {
+        let signature = self.signature(&timestamp, &string_to_sign);
+        let authorization = format!(
+            "{algorithm} Credential={}/{scope}, SignedHeaders={}, Signature={signature}",
+            self.credentials.access_key,
+            signed_headers(&headers_to_sign(req))
+        );
+        req.set_header("Authorization", authorization.clone());
+        Signature {
+            canonical_request,
+            string_to_sign,
+            authorization,
+        }
+    }
+
+    fn signature(&self, timestamp: &str, string_to_sign: &str) -> String {
+        if self.asymmetric {
             use p256::ecdsa::signature::Signer as _;
             let key = v4a_signing_key(self.credentials);
             let sig: p256::ecdsa::Signature = key.sign(string_to_sign.as_bytes());
@@ -135,19 +150,49 @@ impl Signer<'_> {
             let k_region = hmac(&k_date, self.region);
             let k_service = hmac(&k_region, self.service);
             let k_signing = hmac(&k_service, "aws4_request");
-            hex::encode(hmac(&k_signing, &string_to_sign))
-        };
-        let authorization = format!(
-            "{algorithm} Credential={}/{scope}, SignedHeaders={}, Signature={signature}",
-            self.credentials.access_key,
-            signed_headers(&headers_to_sign(req))
-        );
-        req.set_header("Authorization", authorization.clone());
-        Signature {
-            canonical_request,
-            string_to_sign,
-            authorization,
+            hex::encode(hmac(&k_signing, string_to_sign))
         }
+    }
+
+    /// Query-string signing for presigned URLs (`S3SigV4QueryAuth`): only
+    /// `host` is signed, the payload is `UNSIGNED-PAYLOAD`, and the auth
+    /// parameters (then the signature) are appended to the query.
+    pub fn presign(&self, req: &mut Request, now: DateTime<Utc>, expires_in: u64) {
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let scope = format!(
+            "{}/{}/{}/aws4_request",
+            &timestamp[..8],
+            self.region,
+            self.service
+        );
+        req.headers.clear();
+        req.body.clear();
+        let mut params = vec![
+            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
+            (
+                "X-Amz-Credential",
+                format!("{}/{scope}", self.credentials.access_key),
+            ),
+            ("X-Amz-Date", timestamp.clone()),
+            ("X-Amz-Expires", expires_in.to_string()),
+            ("X-Amz-SignedHeaders", "host".to_string()),
+        ];
+        if let Some(token) = &self.credentials.session_token {
+            params.push(("X-Amz-Security-Token", token.clone()));
+        }
+        req.query
+            .extend(params.into_iter().map(|(k, v)| (k.to_string(), v)));
+        let signer = Signer {
+            payload: Some(UNSIGNED_PAYLOAD),
+            ..*self
+        };
+        let canonical_request = signer.canonical_request(req);
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{}",
+            hex::encode(Sha256::digest(canonical_request.as_bytes()))
+        );
+        let signature = self.signature(&timestamp, &string_to_sign);
+        req.query.push(("X-Amz-Signature".into(), signature));
     }
 
     pub fn canonical_request(&self, req: &Request) -> String {

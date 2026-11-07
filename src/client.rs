@@ -489,7 +489,8 @@ impl<'a> Client<'a> {
         params: &Value,
         resp: &crate::http::Response,
     ) -> Result<Value, ClientError> {
-        if resp.status < 300 {
+        // A ranged GET (206) carries no checksum of its part.
+        if resp.status < 300 && resp.status != 206 {
             self.validate_response_checksum(op, params, resp)?;
         }
         rparse::parse(op, resp).map_err(|e| match e {
@@ -516,6 +517,44 @@ impl<'a> Client<'a> {
         let rand = (u64::from_le_bytes(buf) >> 11) as f64 / (1u64 << 53) as f64;
         let base = 2f64.powi(attempt as i32 - 1).min(MAX_BACKOFF_SECS);
         Some(std::time::Duration::from_secs_f64(rand * base))
+    }
+
+    /// A presigned URL for an operation (`generate_presigned_url`): SigV4
+    /// query authentication valid for `expires_in` seconds.
+    pub fn presign_url(
+        &self,
+        op_name: &str,
+        params: &Value,
+        expires_in: u64,
+    ) -> Result<String, ClientError> {
+        let op = self
+            .model
+            .operation(op_name)
+            .map_err(|e| ClientError::Other(e.to_string()))?;
+        let endpoint = RuleSet::new(&self.rules, &self.partitions)
+            .resolve(&self.endpoint_params(&op, params))
+            .map_err(|e| ClientError::Endpoint(e.to_string()))?;
+        if let Some(input) = op.input() {
+            crate::validate::validate(params, &input).map_err(ClientError::Validation)?;
+        }
+        let mut req = ser::serialize(&op, params)
+            .map_err(|e| ClientError::Params(e.to_string()))?
+            .into_request(&endpoint.url);
+        let creds = self
+            .credentials
+            .as_ref()
+            .ok_or_else(|| ClientError::Other("Unable to locate credentials".into()))?;
+        let signing = self.signing_context(&op, &endpoint.properties)?;
+        let signer = Signer {
+            credentials: creds,
+            region: &signing.region,
+            service: &signing.name,
+            s3: signing.s3,
+            payload: None,
+            asymmetric: false,
+        };
+        signer.presign(&mut req, (self.ctx.now)(), expires_in);
+        Ok(req.url())
     }
 
     /// `scheme://host` of the endpoint an operation would be sent to
