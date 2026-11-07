@@ -225,10 +225,24 @@ pub fn generate_key(ctx: &Context) -> SigningKey {
 }
 
 /// `_serialize_to_pem`: SEC1 DER, base64 wrapped at 64 columns.
+///
+/// The DER carries the named-curve parameters (prime256v1) and the public
+/// key, as awscrt's `ECExportFormat.SEC1` does; awscrt cannot load a key
+/// without the curve OID, so the official CLI could not reuse the cache.
 pub fn key_to_pem(key: &SigningKey) -> String {
-    let secret = p256::SecretKey::from(key);
-    let der = secret.to_sec1_der().expect("SEC1 encoding of a valid key");
-    let b64 = STANDARD.encode(&der[..]);
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    // ECPrivateKey ::= SEQUENCE { version 1, privateKey OCTET STRING,
+    //   [0] parameters (OID 1.2.840.10045.3.1.7), [1] publicKey BIT STRING }
+    let private = key.to_bytes();
+    let public = key.verifying_key().to_encoded_point(false);
+    let mut der = vec![0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20];
+    der.extend_from_slice(&private);
+    der.extend_from_slice(&[
+        0xa0, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    ]);
+    der.extend_from_slice(&[0xa1, 0x44, 0x03, 0x42, 0x00]);
+    der.extend_from_slice(public.as_bytes());
+    let b64 = STANDARD.encode(&der);
     let wrapped: Vec<String> = b64
         .as_bytes()
         .chunks(64)
@@ -415,7 +429,8 @@ ibc8wE7p5ADfZFbNUU4XUAVPScFR/VtQ/A==
     fn pem_round_trip() {
         let key = signing_key(TEST_KEY).unwrap();
         let pem = key_to_pem(&key);
-        assert!(pem.starts_with("-----BEGIN EC PRIVATE KEY-----\n"));
+        // Byte for byte what awscrt writes, curve OID and public key included.
+        assert_eq!(pem, TEST_KEY);
         assert_eq!(signing_key(&pem).unwrap().to_bytes(), key.to_bytes());
     }
 
