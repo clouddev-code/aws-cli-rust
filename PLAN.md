@@ -59,6 +59,7 @@ src/
   context.rs         外部依存 (Transport, env, 時計, 入力, スリープ, ブラウザ, TTY) の注入口
   client.rs          モデル駆動の API クライアント (driver と認証情報プロバイダが共用)。検証, standard リトライ
   commands.rs        login, sso login / sso logout
+  s3/                aws s3 高レベルコマンド (mod.rs: ls / mb / rb / rm / presign / cp, transfer.rs: 並列転送とマルチパート, filters.rs: --include/--exclude, mime.rs: Content-Type 推測表)
   oauth.rs           PKCE, 認可コードのローカルコールバック受信 (127.0.0.1), JWT クレーム読み取り
   credentials/
     mod.rs           チェーン本体, assume-role (source_profile / credential_source / MFA), web identity
@@ -86,7 +87,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | **P1** | 上記モジュール全体の MVP | **完了** |
 | **P2** | `--generate-cli-skeleton`, `--cli-input-yaml`, table/yaml/yaml-stream 出力 (`--color`), waiters, モデル入力バリデーション, リトライ (standard), ヘルプ文書の整形 | **完了** |
 | **P3** | assume-role, web-identity, SSO, `aws login` セッション, IMDS/コンテナ認証情報, ページャ, `login` (PKCE / `--remote`), `sso login` (PKCE / デバイスコード), `sso logout` | **完了** (`logout` コマンドは未実装) |
-| P4 | S3 のフレキシブルチェックサム (CRC32 等), `aws s3` 高レベルコマンド, smithy-rpc-v2-cbor, event stream, SigV4a | **下回り 4 項目は完了** (チェックサム / CBOR / event stream / SigV4a、`outfile` 引数を含む)。`aws s3` 高レベルコマンドは次段階 |
+| P4 | S3 のフレキシブルチェックサム (CRC32 等), `aws s3` 高レベルコマンド, smithy-rpc-v2-cbor, event stream, SigV4a | **下回り 4 項目は完了**。`aws s3` は段階 1 (ls / mb / rb / rm / presign / cp、マルチパート・並列) を実装。mv / sync / website は未実装 |
 | **P5** | モデル埋め込み (zstd 圧縮 + 事前変換), `handlers_registry` 相当の改名・非表示表, 補完 | **完了** |
 
 ### テスト結果 (P1 完了時点)
@@ -107,6 +108,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/output_formats.rs` (P2) | 本家の TableFormatter / YAMLFormatter / StreamedYAMLFormatter で生成したフィクスチャ (`tests/fixtures/output/`) との一致。YAML 1.2 の引用規則, 80 桁折り返し, 二重引用のエスケープ, 128 バイト超のキー, 表の縦変換, 全角幅 | 59 ケース 全件一致 |
 | `tests/cli_e2e.rs` (P2/P5) | 改名・非表示エイリアス・削除コマンド, 非表示のページングトークン, バリデーション (本家と同文), standard リトライ (503 / スロットリング / 接続エラー / max_attempts / legacy), table / yaml 出力, `--generate-cli-skeleton` (本家 CLI で生成した 33 ケースと一致), `--cli-input-yaml`, waiters (成功 / 失敗状態 / 未対応エラー / 上限回数, メッセージは botocore で確認), help ページ (本家の man 出力と比較) | 計 32 テスト 成功 |
 | `tests/all_models.rs` (P5) | 埋め込みアーカイブと元のデータディレクトリが全サービス・全ファイルで同じ文書になること | 成功 |
+| `tests/s3_commands.rs` (P4) | リクエスト内容で応答する偽 S3 に対して ls (PRE / サイズ / 集計 / 空のとき 1), mb (LocationConstraint), rb --force, rm (フィルタ / dryrun), cp (アップロード: Content-Type 推測, マルチパート + CRC64NVME, パート失敗で Abort と終了コード 1 / ダウンロード: 再帰, レンジ GET, 親ディレクトリを指すキーの警告と終了コード 2, ディレクトリマーカーの除外 / S3 間コピー / 8 並列), presign (botocore と同じ URL) | 6 テスト 成功 |
 | `tests/completion.rs` (P5) | コマンド, オペレーション, waiter, 引数名 (非表示・使用済みを除く), 値 (選択肢, プロファイル, リージョン, enum) | 2 テスト 成功 |
 | チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 以外), aws-chunked の形式 | 成功 |
 | event stream 単体テスト | botocore `test_eventstream.py` の正常系・異常系ベクタ (CRC 不一致, 重複ヘッダ, ヘッダ長超過) | 成功 |
@@ -122,7 +124,10 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 
 ## 5. 既知の非互換・未対応
 
-- カスタマイズコマンド (`aws s3`, `configure`, `ec2 run-instances --count` など) は未実装 (`login` / `sso login` / `sso logout` は実装済み)。
+- カスタマイズコマンド (`configure`, `ec2 run-instances --count` など) は未実装 (`login` / `sso login` / `sso logout` / `aws s3` の一部は実装済み)。
+- `aws s3`: mv / sync / website は未実装。cp の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
+- `aws s3`: レンジ GET による分割ダウンロードでは、本家のようなパートの CRC を結合した全体チェックサムの照合はしない (206 応答のチェックサム検証は省略)。Content-Type の推測は Python 組み込みの mimetypes 表 (システムの mime.types は読まない) を使う。
+- `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。
 - 改名・非表示は `argrename.py`, `removals.py`, `signin.py`, `cloudwatch.py`, `kinesis.py`, ページング (入力トークンの非表示) を反映済み。独自コマンドを作るカスタマイズ (`rds add-option-to-option-group` / `remove-option-from-option-group`, `ses send-email`, `ec2 authorize-security-group-ingress` の簡易引数など) は未実装で、元のオペレーションのまま使う。メンバー名がグローバル引数と同じ場合 (改名表に無いもの) はグローバル側が優先される。
 - S3 Express (CreateSession によるセッション認証) は未対応。
 - リトライ: `standard` は本家 (AWS_NEW_RETRIES_2026 未設定時) と同じ。`adaptive` はクライアント側のレート制限が無く `standard` と同じ動作。`legacy` は本家 v2 と同じくリトライしない。`amz-sdk-request` の `ttl` は送らない。
