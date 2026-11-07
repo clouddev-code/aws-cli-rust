@@ -25,7 +25,7 @@ pub trait CallbackServer {
 }
 
 pub type CallbackFactory<'a> =
-    Box<dyn Fn(Option<u16>) -> Result<Box<dyn CallbackServer>, String> + 'a>;
+    Box<dyn Fn(Option<u16>) -> Result<Box<dyn CallbackServer>, String> + Send + Sync + 'a>;
 
 /// PKCE verifier and challenge (`secrets.choice` over the unreserved set,
 /// 64 characters; S256 challenge).

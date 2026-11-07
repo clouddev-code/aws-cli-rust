@@ -205,40 +205,37 @@ fn retryable(op: &Operation, resp: &crate::http::Response, code: Option<&str>) -
     false
 }
 
-/// `RetryQuota`: a token bucket shared by the attempts of one client.
+/// `RetryQuota`: a token bucket shared by the attempts of one client (and
+/// by the threads of a transfer).
 #[derive(Debug)]
 struct RetryQuota {
-    available: std::cell::Cell<u32>,
-    /// Capacity taken by the last retry (`retry_quota_capacity`).
-    last: std::cell::Cell<u32>,
+    /// (available tokens, capacity taken by the last retry
+    /// = `retry_quota_capacity`)
+    state: std::sync::Mutex<(u32, u32)>,
 }
 
 impl RetryQuota {
     fn new() -> Self {
         RetryQuota {
-            available: std::cell::Cell::new(INITIAL_RETRY_TOKENS),
-            last: std::cell::Cell::new(0),
+            state: std::sync::Mutex::new((INITIAL_RETRY_TOKENS, 0)),
         }
     }
 
     fn acquire(&self, amount: u32) -> bool {
-        if amount > self.available.get() {
+        let mut s = self.state.lock().unwrap();
+        if amount > s.0 {
             return false;
         }
-        self.available.set(self.available.get() - amount);
-        self.last.set(amount);
+        *s = (s.0 - amount, amount);
         true
     }
 
     /// `release_retry_quota` after a 2xx response.
     fn release(&self, retried: bool) {
-        let amount = if retried {
-            self.last.get()
-        } else {
-            NO_RETRY_INCREMENT
-        };
-        let room = INITIAL_RETRY_TOKENS - self.available.get();
-        self.available.set(self.available.get() + amount.min(room));
+        let mut s = self.state.lock().unwrap();
+        let amount = if retried { s.1 } else { NO_RETRY_INCREMENT };
+        let room = INITIAL_RETRY_TOKENS - s.0;
+        s.0 += amount.min(room);
     }
 }
 

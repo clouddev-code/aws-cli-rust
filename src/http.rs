@@ -156,7 +156,8 @@ impl std::error::Error for TransportError {}
 
 /// Sends a signed request. Tests inject a fake implementation so no socket
 /// is ever opened.
-pub trait Transport {
+/// `Sync` so transfers can run on several threads.
+pub trait Transport: Sync {
     fn send(&self, req: &Request) -> Result<Response, TransportError>;
 }
 

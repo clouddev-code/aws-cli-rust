@@ -9,28 +9,29 @@ use awsr::config::{SharedConfig, parse_ini};
 use awsr::driver::{self, Context};
 use awsr::http::{Request, Response, Transport, TransportError};
 use chrono::{TimeZone, Utc};
-use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 struct FakeTransport {
-    requests: RefCell<Vec<Request>>,
-    responses: RefCell<VecDeque<Response>>,
+    requests: Mutex<Vec<Request>>,
+    responses: Mutex<VecDeque<Response>>,
 }
 
 impl FakeTransport {
     fn new(responses: Vec<Response>) -> Self {
         FakeTransport {
-            requests: RefCell::new(Vec::new()),
-            responses: RefCell::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into()),
         }
     }
 }
 
 impl Transport for FakeTransport {
     fn send(&self, req: &Request) -> Result<Response, TransportError> {
-        self.requests.borrow_mut().push(req.clone());
+        self.requests.lock().unwrap().push(req.clone());
         self.responses
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .pop_front()
             .ok_or_else(|| TransportError("no canned response left".into()))
     }
@@ -83,7 +84,7 @@ fn run_with(
         code,
         stdout: String::from_utf8(out).unwrap(),
         stderr: String::from_utf8(err).unwrap(),
-        requests: transport.requests.take(),
+        requests: std::mem::take(&mut *transport.requests.lock().unwrap()),
     })
 }
 
@@ -1217,21 +1218,21 @@ fn run_recording_sleeps(
 ) -> Option<(Run, Vec<std::time::Duration>)> {
     let loader = common::loader_or_skip()?;
     let transport = FakeTransport::new(responses);
-    let sleeps = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let sleeps = Arc::new(Mutex::new(Vec::new()));
     let mut ctx = test_context(loader, &transport, env);
     let recorder = sleeps.clone();
-    ctx.sleep = Box::new(move |d| recorder.borrow_mut().push(d));
+    ctx.sleep = Box::new(move |d| recorder.lock().unwrap().push(d));
     let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = driver::run(&ctx, &argv, &mut out, &mut err);
     drop(ctx);
-    let sleeps = sleeps.borrow().clone();
+    let sleeps = sleeps.lock().unwrap().clone();
     Some((
         Run {
             code,
             stdout: String::from_utf8(out).unwrap(),
             stderr: String::from_utf8(err).unwrap(),
-            requests: transport.requests.take(),
+            requests: std::mem::take(&mut *transport.requests.lock().unwrap()),
         },
         sleeps,
     ))
