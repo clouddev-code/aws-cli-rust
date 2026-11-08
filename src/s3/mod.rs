@@ -381,6 +381,20 @@ pub(crate) fn run(
             "aws: error: argument operation: Invalid choice: '{command}' (awsr implements cp, ls, mb, mv, presign, rb, rm, sync, website)"
         )));
     }
+    // Keys and error text come from responses (issue #4).
+    let (mut safe_out, mut safe_err);
+    let out: &mut dyn Write = if ctx.stdout_is_tty {
+        safe_out = TerminalSafe(out);
+        &mut safe_out
+    } else {
+        out
+    };
+    let err: &mut dyn Write = if ctx.stderr_is_tty {
+        safe_err = TerminalSafe(err);
+        &mut safe_err
+    } else {
+        err
+    };
     let args = parse_args(command, &tokens[1..])?;
     let model = ctx.loader.service_model("s3").map_err(Failure::general)?;
     let client = crate::driver::service_client(ctx, globals, &model, false)?;
@@ -1355,6 +1369,23 @@ impl S3<'_, '_> {
             extra.insert("MetadataDirective".into(), Value::Str("REPLACE".into()));
         }
         Ok(extra)
+    }
+}
+
+/// A writer that passes text through [`crate::output::terminal_safe`]
+/// (s3 output never contains control characters of its own).
+struct TerminalSafe<'w>(&'w mut dyn Write);
+
+impl Write for TerminalSafe<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        self.0
+            .write_all(crate::output::terminal_safe(&text).as_bytes())?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
     }
 }
 

@@ -186,6 +186,7 @@ impl<'a> Setup<'a> {
                 true
             }),
             stdout_is_tty: false,
+            stderr_is_tty: false,
             terminal_width: None,
             local_time: Box::new(|t| t.naive_utc()),
             random: Box::new(|n| (0..n).map(|i| (i * 31 + 7) as u8).collect()),
@@ -841,6 +842,7 @@ fn pager_selection() {
         sleep: Box::new(|_| {}),
         open_browser: Box::new(|_| false),
         stdout_is_tty: true,
+        stderr_is_tty: false,
         terminal_width: None,
         local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),

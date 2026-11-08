@@ -137,6 +137,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `--generate-cli-skeleton output` は本家と違い、生成した応答をモデルで検証しない (本家は検証に失敗して出力できない操作がある)。
 - waiter で `--starting-token` / `--page-size` / `--max-items` を指定しても無視する。
 - help: 太字・下線は再現しない。本家 (docutils) の癖のうち、リンク直後の ` .` や docutils の警告文は再現しない。HTML 内の見出し (`<h3>` 等) の位置が少し違う。`aws help topics` は未実装。
+- 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
 - `login` / `sso login` のローカルコールバックは `/oauth/callback` 以外のパスに 404 を返して待ち続ける (本家はパスを確認しない。issue #5)。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
 - `auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`) は未対応で、エンドポイント / モデルが示す先頭の対応方式を使う。

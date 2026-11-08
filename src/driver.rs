@@ -66,7 +66,13 @@ pub fn run(ctx: &Context, argv: &[String], out: &mut dyn Write, err: &mut dyn Wr
         Ok(()) => exit::OK,
         Err(f) => {
             if !f.message.is_empty() {
-                let _ = writeln!(err, "{}", f.message);
+                // Error text can carry response data (issue #4).
+                let message = if ctx.stderr_is_tty {
+                    output::terminal_safe(&f.message)
+                } else {
+                    f.message.as_str().into()
+                };
+                let _ = writeln!(err, "{message}");
             }
             f.code
         }
@@ -504,7 +510,7 @@ fn output_settings(
     ctx: &Context,
     globals: &Globals,
     title: &str,
-) -> Result<(OutputFormat, output::TableStyle), Failure> {
+) -> Result<(OutputFormat, output::RenderOptions), Failure> {
     let format = match globals
         .output
         .clone()
@@ -528,10 +534,11 @@ fn output_settings(
             )));
         }
     };
-    let style = output::TableStyle {
+    let style = output::RenderOptions {
         title: title.to_string(),
         terminal_width: ctx.terminal_width.unwrap_or(80),
         color,
+        escape_controls: ctx.stdout_is_tty,
     };
     Ok((format, style))
 }

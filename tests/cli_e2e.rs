@@ -104,6 +104,7 @@ fn test_context<'a>(
         sleep: Box::new(|_| {}),
         open_browser: Box::new(|_| false),
         stdout_is_tty: false,
+        stderr_is_tty: false,
         terminal_width: None,
         local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),
@@ -1612,4 +1613,77 @@ fn help_pages_match_awscli_man_output() {
     let r = run(&["help"], vec![]).unwrap();
     assert!(r.stdout.contains("AVAILABLE SERVICES"));
     assert!(r.stdout.contains("       o s3api\n"));
+}
+
+#[test]
+fn control_characters_are_escaped_on_a_terminal() {
+    let xml = "<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn</Arn><UserId>\u{1b}[31mEVIL\u{1b}[0m</UserId><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>";
+    let run_tty = |args: &[&str], responses: Vec<Response>, tty: bool| {
+        let loader = common::loader_or_skip()?;
+        let transport = FakeTransport::new(responses);
+        let mut env = default_env();
+        env.insert("AWS_PAGER".into(), String::new());
+        let mut ctx = test_context(loader, &transport, env);
+        ctx.stdout_is_tty = tty;
+        ctx.stderr_is_tty = tty;
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = driver::run(&ctx, &argv, &mut out, &mut err);
+        Some((
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        ))
+    };
+    let Some((code, out, _)) = run_tty(
+        &["sts", "get-caller-identity", "--output", "text"],
+        vec![ok(xml)],
+        true,
+    ) else {
+        return;
+    };
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\\x1b[31mEVIL\\x1b[0m") && !out.contains('\u{1b}'),
+        "{out:?}"
+    );
+    // Not a terminal: the data is passed through unchanged.
+    let (_, out, _) = run_tty(
+        &["sts", "get-caller-identity", "--output", "text"],
+        vec![ok(xml)],
+        false,
+    )
+    .unwrap();
+    assert!(out.contains("\u{1b}[31mEVIL"), "{out:?}");
+    // Table (color off): cells are escaped, the frame is intact.
+    let (_, out, _) = run_tty(
+        &[
+            "sts",
+            "get-caller-identity",
+            "--output",
+            "table",
+            "--color",
+            "off",
+        ],
+        vec![ok(xml)],
+        true,
+    )
+    .unwrap();
+    assert!(
+        out.contains("\\x1b[31mEVIL") && !out.contains('\u{1b}'),
+        "{out:?}"
+    );
+    // Error messages on stderr.
+    let err_xml = "<ErrorResponse><Error><Code>Bad</Code><Message>\u{1b}]0;pwned\u{7}</Message></Error></ErrorResponse>";
+    let (code, _, err) = run_tty(
+        &["sts", "get-caller-identity"],
+        vec![status(400, err_xml)],
+        true,
+    )
+    .unwrap();
+    assert_eq!(code, 254);
+    assert!(
+        err.contains("\\x1b]0;pwned\\x07") && !err.contains('\u{1b}'),
+        "{err:?}"
+    );
 }

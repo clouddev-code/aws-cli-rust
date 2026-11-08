@@ -59,6 +59,10 @@ struct Run {
 const CONFIG: &str = "[default]\nregion = us-east-1\ns3 =\n  max_concurrent_requests = 1\n";
 
 fn run_s3(args: &[&str], config: &str, handler: Handler) -> Option<Run> {
+    run_s3_with(args, config, handler, false)
+}
+
+fn run_s3_with(args: &[&str], config: &str, handler: Handler, tty: bool) -> Option<Run> {
     let loader = common::loader_or_skip()?;
     let transport = FakeS3 {
         handler,
@@ -84,7 +88,8 @@ fn run_s3(args: &[&str], config: &str, handler: Handler) -> Option<Run> {
         prompt: Box::new(|_| None),
         sleep: Box::new(|_| {}),
         open_browser: Box::new(|_| false),
-        stdout_is_tty: false,
+        stdout_is_tty: tty,
+        stderr_is_tty: tty,
         terminal_width: None,
         local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),
@@ -970,4 +975,35 @@ fn keys_mapping_to_one_local_file_are_downloaded_once() {
     );
     assert!(r.stderr.contains("Skipping file a//b.txt."), "{}", r.stderr);
     assert!(dir.join("a/b.txt").exists());
+}
+
+#[test]
+fn s3_output_escapes_control_characters_on_a_terminal() {
+    let list = "<ListBucketResult><Contents><Key>p/\u{1b}[2Jx.txt</Key><Size>1</Size><LastModified>2015-08-30T01:02:03.000Z</LastModified></Contents></ListBucketResult>";
+    let Some(r) = run_s3_with(
+        &["ls", "s3://bkt/p/"],
+        CONFIG,
+        Box::new(move |_| ok(list)),
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        r.stdout.contains("\\x1b[2Jx.txt") && !r.stdout.contains('\u{1b}'),
+        "{:?}",
+        r.stdout
+    );
+    let r = run_s3_with(
+        &["rm", "s3://bkt/p/", "--recursive", "--dryrun"],
+        CONFIG,
+        Box::new(move |_| ok(list)),
+        true,
+    )
+    .unwrap();
+    assert!(
+        r.stdout
+            .contains("(dryrun) delete: s3://bkt/p/\\x1b[2Jx.txt"),
+        "{:?}",
+        r.stdout
+    );
 }

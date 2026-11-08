@@ -183,6 +183,7 @@ fn main() {
         sleep: Box::new(std::thread::sleep),
         open_browser: Box::new(open_browser),
         stdout_is_tty: std::io::stdout().is_terminal(),
+        stderr_is_tty: std::io::stderr().is_terminal(),
         terminal_width: terminal_width(),
         local_time: Box::new(|t| t.with_timezone(&chrono::Local).naive_local()),
         random: Box::new(awsr::oauth::os_random),
