@@ -126,7 +126,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 ## 5. 既知の非互換・未対応
 
 - カスタマイズコマンド (`configure`, `ec2 run-instances --count` など) は未実装 (`login` / `sso login` / `sso logout` / `aws s3` の一部は実装済み)。
-- `aws s3` の cp / mv / sync の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size --tags` のみ と、sync の `--delete --size-only --exact-timestamps` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks`, sync の `--no-overwrite` / `--case-conflict` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
+- `aws s3` の cp / mv / sync の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size --tags` と、sync の `--delete --size-only --exact-timestamps` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks`, sync の `--no-overwrite` / `--case-conflict` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
 - `aws s3`: レンジ GET による分割ダウンロードでは、本家のようなパートの CRC を結合した全体チェックサムの照合はしない (206 応答のチェックサム検証は省略)。Content-Type の推測は Python 組み込みの mimetypes 表 (システムの mime.types は読まない) を使う。
 - `aws s3 cp` の S3 間コピー: `--copy-props` は未対応。マルチパートコピー (`multipart_threshold` 以上) ではコピー元のメタデータを引き継がない (s3transfer 単体と同じ。本家 awscli は既定でコピー元の HeadObject から引き継ぐ)。
 - `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。応答本文も、オブジェクトやレンジの期待サイズ + 1 MiB を上限にする。
