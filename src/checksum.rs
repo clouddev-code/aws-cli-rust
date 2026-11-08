@@ -2,8 +2,8 @@
 //! checksum resolution (header or aws-chunked trailer) and response
 //! validation.
 //!
-//! XXHASH3 and XXHASH128 come from the CRT in botocore and are not
-//! implemented; requesting them is an "Unsupported checksum algorithm" error.
+//! botocore takes the XXHASH family from the CRT; awsr has its own XXH64 and
+//! uses the `xxhash-rust` crate for XXH3 (64 and 128 bit).
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -18,13 +18,17 @@ pub enum Algorithm {
     Sha256,
     Sha512,
     Xxhash64,
+    Xxhash3,
+    Xxhash128,
 }
 
 /// `DEFAULT_CHECKSUM_ALGORITHM`.
 pub const DEFAULT: Algorithm = Algorithm::Crc64Nvme;
 
-/// `_ALGORITHMS_PRIORITY_LIST`, restricted to what is implemented.
+/// `_ALGORITHMS_PRIORITY_LIST`.
 pub const PRIORITY: &[Algorithm] = &[
+    Algorithm::Xxhash128,
+    Algorithm::Xxhash3,
     Algorithm::Crc64Nvme,
     Algorithm::Xxhash64,
     Algorithm::Crc32c,
@@ -44,6 +48,8 @@ impl Algorithm {
             "sha256" => Algorithm::Sha256,
             "sha512" => Algorithm::Sha512,
             "xxhash64" => Algorithm::Xxhash64,
+            "xxhash3" => Algorithm::Xxhash3,
+            "xxhash128" => Algorithm::Xxhash128,
             _ => return None,
         })
     }
@@ -58,6 +64,8 @@ impl Algorithm {
             Algorithm::Sha256 => "sha256",
             Algorithm::Sha512 => "sha512",
             Algorithm::Xxhash64 => "xxhash64",
+            Algorithm::Xxhash3 => "xxhash3",
+            Algorithm::Xxhash128 => "xxhash128",
         }
     }
 
@@ -74,6 +82,8 @@ impl Algorithm {
             Algorithm::Sha256 => State::Sha256(sha2::Sha256::new()),
             Algorithm::Sha512 => State::Sha512(sha2::Sha512::new()),
             Algorithm::Xxhash64 => State::Xxh64(Xxh64::new()),
+            Algorithm::Xxhash3 => State::Xxh3_64(Box::default()),
+            Algorithm::Xxhash128 => State::Xxh3_128(Box::default()),
         })
     }
 
@@ -98,6 +108,8 @@ enum State {
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
     Xxh64(Xxh64),
+    Xxh3_64(Box<xxhash_rust::xxh3::Xxh3Default>),
+    Xxh3_128(Box<xxhash_rust::xxh3::Xxh3Default>),
 }
 
 impl Hasher {
@@ -110,6 +122,7 @@ impl Hasher {
             State::Sha256(h) => h.update(data),
             State::Sha512(h) => h.update(data),
             State::Xxh64(h) => h.update(data),
+            State::Xxh3_64(h) | State::Xxh3_128(h) => h.update(data),
         }
     }
 
@@ -122,6 +135,8 @@ impl Hasher {
             State::Sha256(h) => h.finalize().to_vec(),
             State::Sha512(h) => h.finalize().to_vec(),
             State::Xxh64(h) => h.finish().to_be_bytes().to_vec(),
+            State::Xxh3_64(h) => h.digest().to_be_bytes().to_vec(),
+            State::Xxh3_128(h) => h.digest128().to_be_bytes().to_vec(),
         }
     }
 
@@ -318,6 +333,8 @@ mod tests {
             (Algorithm::Crc32c, "yZRlqg=="),
             (Algorithm::Crc64Nvme, "jSnVw/bqjr4="),
             (Algorithm::Xxhash64, "RatnNLIeaWg="),
+            (Algorithm::Xxhash3, "1Eex6kDmmIs="),
+            (Algorithm::Xxhash128, "340J6T+HSQCpm4d1zBW2xw=="),
         ] {
             assert_eq!(a.b64digest(b"hello world"), want, "{a:?}");
         }

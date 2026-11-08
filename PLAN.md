@@ -47,7 +47,7 @@ src/
   timestamp.rs       iso8601 / rfc822 / unixTimestamp, Python isoformat 互換出力
   endpoint/mod.rs    エンドポイントルールエンジン (標準関数 12 種)
   sigv4.rs           AWS Signature V4 (通常 / S3 フレーバー) と SigV4a (ECDSA P-256)
-  checksum.rs        フレキシブルチェックサム (CRC32/CRC32C/CRC64NVME/SHA1/SHA256/SHA512/XXHASH64), aws-chunked
+  checksum.rs        フレキシブルチェックサム (CRC32/CRC32C/CRC64NVME/SHA1/SHA256/SHA512/XXHASH64/XXHASH3/XXHASH128), aws-chunked
   http.rs            Request / Response, Transport トレイト, ureq 実装
   protocol/
     ser.rs           query / ec2 / json / rest-json / rest-xml / smithy-rpc-v2-cbor シリアライザ
@@ -144,7 +144,6 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `login` の対話はプレーンな標準入力で行う (本家のリージョン補完付きプロンプトや agent toolkit の案内は無い)。
 - `sso login` の vanity URL 解決 (`resolve_start_url`) は未対応で、設定の `sso_start_url` をそのまま使う。
 - 認証情報が何も無い環境では、本家と同様に IMDS へ問い合わせるため約 1 秒かかる。
-- チェックサムの XXHASH3 / XXHASH128 は未実装 (本家は awscrt)。指定すると `Unsupported checksum algorithm` になり、レスポンス検証では次の優先度のアルゴリズムを使う。
 - aws-chunked トレーラ付きの送信は、本文をメモリに持つため `Transfer-Encoding: chunked` ではなくエンコード後の `Content-Length` で送る (S3 はどちらも受け付ける)。
 - HTTP のリダイレクトはたどらない (botocore と同じく 3xx は応答として扱う)。ureq に任せると `X-Amz-Security-Token` などがリダイレクト先ホストへ送られるため (oss-scan 指摘)。
 - 応答本文の上限: 通常の API 応答 512 MiB、IMDS / コンテナ認証情報 1 MiB。超えたらリトライせずエラー。ストリーミング出力 (`get-object` の outfile, event stream) は上限なしでメモリに読む (Transport のストリーミング化までの制限)。

@@ -1728,3 +1728,41 @@ fn help_parameter_matches_help_command() {
         assert!(a.requests.is_empty());
     }
 }
+
+#[test]
+fn xxhash3_and_xxhash128_checksums() {
+    let file = temp_file("put-xx.txt", b"hello world");
+    for (alg, header, value) in [
+        ("XXHASH3", "x-amz-checksum-xxhash3", "1Eex6kDmmIs="),
+        (
+            "XXHASH128",
+            "x-amz-checksum-xxhash128",
+            "340J6T+HSQCpm4d1zBW2xw==",
+        ),
+    ] {
+        let Some(r) = run(
+            &[
+                "s3api",
+                "put-object",
+                "--bucket",
+                "b1",
+                "--key",
+                "k",
+                "--body",
+                file.to_str().unwrap(),
+                "--checksum-algorithm",
+                alg,
+            ],
+            vec![ok("")],
+        ) else {
+            return;
+        };
+        assert_eq!(r.code, 0, "{alg}: {}", r.stderr);
+        let req = &r.requests[0];
+        assert_eq!(req.header("X-Amz-Trailer"), Some(header));
+        assert_eq!(
+            body(req),
+            format!("b\r\nhello world\r\n0\r\n{header}:{value}\r\n\r\n")
+        );
+    }
+}
