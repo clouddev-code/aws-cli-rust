@@ -751,6 +751,16 @@ pub(crate) fn service_client<'a>(
             .or_else(|| ctx.config.get(&profile, "sigv4a_signing_region_set"))
             .filter(|v| !v.is_empty()),
         retry: retry_config(ctx, &profile)?,
+        auth_scheme_preference: ctx
+            .env_var("AWS_AUTH_SCHEME_PREFERENCE")
+            .or_else(|| ctx.config.get(&profile, "auth_scheme_preference"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     Client::new(ctx, model, config, credentials).map_err(Failure::general)
 }

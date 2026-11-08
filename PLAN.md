@@ -140,7 +140,6 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する。JSON では DEL と C1 も `\u009b` のようにエスケープする (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
 - `login` / `sso login` のローカルコールバックは `/oauth/callback` 以外のパスに 404 を返して待ち続ける (本家はパスを確認しない。issue #5)。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
-- `auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`) は未対応で、エンドポイント / モデルが示す先頭の対応方式を使う。
 - `login` の対話はプレーンな標準入力で行う (本家のリージョン補完付きプロンプトや agent toolkit の案内は無い)。
 - `sso login` の vanity URL 解決 (`resolve_start_url`) は未対応で、設定の `sso_start_url` をそのまま使う。
 - 認証情報が何も無い環境では、本家と同様に IMDS へ問い合わせるため約 1 秒かかる。

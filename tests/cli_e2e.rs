@@ -1766,3 +1766,43 @@ fn xxhash3_and_xxhash128_checksums() {
         );
     }
 }
+
+#[test]
+fn auth_scheme_preference_reorders_the_service_schemes() {
+    let xml = "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>";
+    let auth = |env: HashMap<String, String>, config: &str| {
+        let r = run_with(
+            &["sts", "get-caller-identity"],
+            vec![ok(xml)],
+            env,
+            SharedConfig::from_parts(&parse_ini(config), Default::default()),
+        )?;
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        Some(
+            r.requests[0]
+                .header("Authorization")
+                .unwrap()
+                .split(' ')
+                .next()
+                .unwrap()
+                .to_string(),
+        )
+    };
+    // STS lists sigv4 then sigv4a.
+    let Some(default) = auth(default_env(), "") else {
+        return;
+    };
+    assert_eq!(default, "AWS4-HMAC-SHA256");
+    let mut env = default_env();
+    env.insert("AWS_AUTH_SCHEME_PREFERENCE".into(), "sigv4a, sigv4".into());
+    assert_eq!(auth(env, "").unwrap(), "AWS4-ECDSA-P256-SHA256");
+    // From the profile; unknown or unsupported names are skipped.
+    assert_eq!(
+        auth(
+            default_env(),
+            "[default]\nauth_scheme_preference = httpBearerAuth,sigv4a\n"
+        )
+        .unwrap(),
+        "AWS4-ECDSA-P256-SHA256"
+    );
+}
