@@ -111,7 +111,11 @@ pub fn complete(loader: &Loader, config: &SharedConfig, line: &str) -> Vec<Strin
             );
         }
         let mut names = loader.command_names();
-        names.extend(["help".to_string(), "login".to_string()]);
+        names.extend([
+            "help".to_string(),
+            "login".to_string(),
+            "logout".to_string(),
+        ]);
         names.sort();
         return filter(names, current);
     };

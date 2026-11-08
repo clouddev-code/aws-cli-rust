@@ -116,7 +116,7 @@ fn run_inner(
     };
     if command == "help" {
         let mut commands = ctx.loader.command_names();
-        commands.push("login".into());
+        commands.extend(["login".to_string(), "logout".to_string()]);
         commands.sort();
         let page = crate::help::top_level(&commands);
         return emit(
@@ -137,6 +137,10 @@ fn run_inner(
                 message: String::new(),
             }),
         };
+    }
+    if command == "logout" {
+        let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
+        return crate::commands::logout(ctx, &profile_name(ctx, &globals), &tokens, out, err);
     }
     if command == "login" {
         let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();

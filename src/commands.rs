@@ -15,6 +15,60 @@ fn credential_failure(e: CredentialError) -> Failure {
     }
 }
 
+/// `aws logout` (customizations/login/logout.py): remove the cached
+/// `aws login` session of the profile, or with `--all` every cached login
+/// session.
+pub(crate) fn logout(
+    ctx: &Context,
+    profile: &str,
+    tokens: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    let mut all = false;
+    for t in tokens {
+        match t.as_str() {
+            "--all" => all = true,
+            other => {
+                return Err(Failure::usage(format!(
+                    "aws: error: Unknown options: {other}"
+                )));
+            }
+        }
+    }
+    let cache = crate::credentials::login::token_cache(ctx);
+    if all {
+        let removed = cache.remove_matching(|doc| {
+            doc.get("accessToken")
+                .and_then(|t| t.as_object())
+                .is_some_and(|t| t.contains_key("accessKeyId"))
+        });
+        if removed > 0 {
+            let plural = if removed == 1 { "" } else { "s" };
+            let _ = writeln!(
+                out,
+                "Removed {removed} cached login credential{plural}. Note, any local developer tools that have already loaded access tokens may continue to use them until their expiration. Access tokens expire in 15 minutes."
+            );
+        } else {
+            let _ = writeln!(out, "No cached login session tokens found.");
+        }
+        return Ok(());
+    }
+    let Some(session) = ctx.config.get(profile, "login_session") else {
+        let _ = writeln!(
+            err,
+            "warning: no login session found for profile '{profile}'"
+        );
+        return Ok(());
+    };
+    let _ = cache.remove(&crate::credentials::cache::sha256_hex(&session));
+    let _ = writeln!(
+        out,
+        "Removed cached login credentials for profile '{profile}'. Note, any local developer tools that have already loaded the access token may continue to use it until its expiration. Access tokens expire in 15 minutes."
+    );
+    Ok(())
+}
+
 /// `aws sso login` / `aws sso logout`.
 pub(crate) fn sso(
     ctx: &Context,

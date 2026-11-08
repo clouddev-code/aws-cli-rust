@@ -33,6 +33,26 @@ impl JsonFileCache {
         std::fs::remove_file(self.path(key))
     }
 
+    /// Delete every cached JSON document `pred` accepts; unreadable files
+    /// are left alone (`BaseCredentialSweeper`). Returns how many were
+    /// removed.
+    pub fn remove_matching(&self, pred: impl Fn(&J) -> bool) -> usize {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let doc = std::fs::read(&path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<J>(&b).ok());
+            if doc.as_ref().is_some_and(&pred) && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// All parseable entries as (path, contents).
     pub fn entries(&self) -> Vec<(PathBuf, J)> {
         let Ok(rd) = std::fs::read_dir(&self.dir) else {

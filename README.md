@@ -100,7 +100,7 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - 認証情報 (本家と同じ順序): 環境変数、assume-role (`source_profile` / `credential_source` / MFA / ロールチェーン)、web identity、IAM Identity Center (SSO)、`aws login` セッション、`~/.aws/credentials`、`credential_process`、`~/.aws/config`、コンテナ、EC2 インスタンスメタデータ (IMDSv2)
 - 一時認証情報は本家と同じ `~/.aws/cli/cache` / `~/.aws/sso/cache` / `~/.aws/login/cache` を読み書きするので、本家 `aws` とキャッシュを共有できます
 - `login` (ブラウザ + PKCE、`--remote` でコード貼り付け) — 本家 `aws login` と同じキャッシュとプロファイル設定 (`login_session`) を作成
-- `sso login` (sso-session 構成では PKCE、`--use-device-code` でデバイスコード方式) / `sso logout`
+- `sso login` (sso-session 構成では PKCE、`--use-device-code` でデバイスコード方式) / `sso logout` / `logout` (`aws login` セッションの削除、`--all`)
 - ページャ (`AWS_PAGER` → `cli_pager` → `PAGER` → `less`、端末出力のときだけ、`--no-cli-pager` で無効)
 - 引数: スカラー、リスト、JSON、shorthand 構文、`file://` / `fileb://`、`--cli-input-json` / `--cli-input-yaml`、blob の base64 (`--cli-binary-format`)
 - 本家の引数・コマンドの改名と非表示 (`ec2 create-image --reboot`、`sns subscribe --notification-endpoint`、削除されたコマンドなど)

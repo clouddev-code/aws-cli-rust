@@ -1133,3 +1133,47 @@ fn sso_login_pkce_for_sso_session() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.requests.len(), 1, "no new RegisterClient");
 }
+
+#[test]
+fn logout_removes_login_sessions() {
+    let home = Home::new("logout");
+    let session = "arn:aws:iam::123456789012:user/me";
+    let token =
+        r#"{"accessToken": {"accessKeyId": "ASIA", "secretAccessKey": "s"}, "refreshToken": "r"}"#;
+    let mine = home.write(
+        &format!(".aws/login/cache/{}.json", sha256_hex(session)),
+        token,
+    );
+    let other = home.write(".aws/login/cache/other.json", token);
+    let unrelated = home.write(".aws/login/cache/unrelated.json", r#"{"startUrl": "x"}"#);
+    let config = format!(
+        "[profile console]\nlogin_session = {session}\n[profile plain]\nregion = us-east-1\n"
+    );
+    let s = Setup::new(&home, &config);
+    let Some(r) = s.run(&["logout", "--profile", "console"], vec![]) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .starts_with("Removed cached login credentials for profile 'console'.")
+    );
+    assert!(!mine.exists() && other.exists());
+    // A profile without a login session only warns.
+    let r = s.run(&["logout", "--profile", "plain"], vec![]).unwrap();
+    assert_eq!(r.code, 0);
+    assert_eq!(
+        r.stderr,
+        "warning: no login session found for profile 'plain'\n"
+    );
+    // --all removes every login token, not other cached documents.
+    let r = s.run(&["logout", "--all"], vec![]).unwrap();
+    assert_eq!(
+        r.stdout,
+        "Removed 1 cached login credential. Note, any local developer tools that have already loaded access tokens may continue to use them until their expiration. Access tokens expire in 15 minutes.\n"
+    );
+    assert!(!other.exists() && unrelated.exists());
+    let r = s.run(&["logout", "--all"], vec![]).unwrap();
+    assert_eq!(r.stdout, "No cached login session tokens found.\n");
+    assert!(r.requests.is_empty());
+}

@@ -86,7 +86,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 |---|---|---|
 | **P1** | 上記モジュール全体の MVP | **完了** |
 | **P2** | `--generate-cli-skeleton`, `--cli-input-yaml`, table/yaml/yaml-stream 出力 (`--color`), waiters, モデル入力バリデーション, リトライ (standard), ヘルプ文書の整形 | **完了** |
-| **P3** | assume-role, web-identity, SSO, `aws login` セッション, IMDS/コンテナ認証情報, ページャ, `login` (PKCE / `--remote`), `sso login` (PKCE / デバイスコード), `sso logout` | **完了** (`logout` コマンドは未実装) |
+| **P3** | assume-role, web-identity, SSO, `aws login` セッション, IMDS/コンテナ認証情報, ページャ, `login` (PKCE / `--remote`), `sso login` (PKCE / デバイスコード), `sso logout` | **完了** |
 | P4 | S3 のフレキシブルチェックサム (CRC32 等), `aws s3` 高レベルコマンド, smithy-rpc-v2-cbor, event stream, SigV4a | **下回り 4 項目は完了**。`aws s3` は cp / ls / mb / mv / presign / rb / rm / sync / website を実装 (マルチパート・並列) |
 | **P5** | モデル埋め込み (zstd 圧縮 + 事前変換), `handlers_registry` 相当の改名・非表示表, 補完 | **完了** |
 
@@ -141,7 +141,6 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `login` / `sso login` のローカルコールバックは `/oauth/callback` 以外のパスに 404 を返して待ち続ける (本家はパスを確認しない。issue #5)。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
 - `auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`) は未対応で、エンドポイント / モデルが示す先頭の対応方式を使う。
-- `logout` (aws login セッションの削除) は未実装。
 - `login` の対話はプレーンな標準入力で行う (本家のリージョン補完付きプロンプトや agent toolkit の案内は無い)。
 - `sso login` の vanity URL 解決 (`resolve_start_url`) は未対応で、設定の `sso_start_url` をそのまま使う。
 - 認証情報が何も無い環境では、本家と同様に IMDS へ問い合わせるため約 1 秒かかる。
