@@ -108,7 +108,7 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - リトライ: standard モード (最大 3 回、指数バックオフ + ジッタ、リトライクォータ)。`retry_mode` / `max_attempts` (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`)
 - 自動ページング、`--max-items` / `--page-size` / `--starting-token`、`--no-paginate`
 - `wait` コマンド (waiters-2.json の全 waiter)
-- `aws s3`: cp / ls / mb / mv / presign / rb / rm / sync / website (`--recursive`、`--include` / `--exclude`、sync の `--delete` / `--size-only` / `--exact-timestamps`、マルチパート・並列転送。`[profile] s3 =` の `max_concurrent_requests` / `multipart_threshold` / `multipart_chunksize`)
+- `aws s3`: cp / ls / mb / mv / presign / rb / rm / sync / website (`--recursive`、`--include` / `--exclude`、sync の `--delete` / `--size-only` / `--exact-timestamps`、アップロードと mb の `--tags`、マルチパート・並列転送。`[profile] s3 =` の `max_concurrent_requests` / `multipart_threshold` / `multipart_chunksize`)
 - `--generate-cli-skeleton` (`input` / `yaml-input` / `output`)
 - 出力: json / text / table / yaml / yaml-stream / off、`--query` (JMESPath)、`--color` (table の色付け)
 - help: 本家の man ページと同じ構成 (説明、構文、オプション、グローバルオプション、例、出力)

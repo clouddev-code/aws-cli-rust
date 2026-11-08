@@ -1007,3 +1007,63 @@ fn s3_output_escapes_control_characters_on_a_terminal() {
         r.stdout
     );
 }
+
+#[test]
+fn tags_on_uploads_and_buckets() {
+    let (dir, rel) = scratch("tags");
+    std::fs::write(dir.join("a.txt"), b"a").unwrap();
+    let a = format!("{rel}/a.txt");
+    let Some(r) = run_s3(
+        &[
+            "cp",
+            &a,
+            "s3://bkt/a.txt",
+            "--tags",
+            "env",
+            "prod",
+            "--tags",
+            "team",
+            "a b&c",
+        ],
+        CONFIG,
+        Box::new(|_| ok("")),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.requests[0].header("x-amz-tagging"),
+        Some("env=prod&team=a%20b%26c")
+    );
+    // Only local-to-S3 transfers take tags.
+    let r = run_s3(
+        &["cp", "s3://bkt/a.txt", &a, "--tags", "k", "v"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains("Expected tags parameter to be used with one of following path formats: <LocalPath> <S3Uri>. Instead, received <S3Uri> <LocalPath>."), "{}", r.stderr);
+    assert!(r.requests.is_empty());
+    let r = run_s3(
+        &["cp", &a, "s3://bkt/a.txt", "--tags", "only-key"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    // mb --tags in us-east-1 sends a configuration with just the tags.
+    let r = run_s3(
+        &["mb", "s3://new", "--tags", "env", "dev"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let body = String::from_utf8(r.requests[0].body.clone()).unwrap();
+    assert!(
+        body.contains("<Tags><Tag><Key>env</Key><Value>dev</Value></Tag></Tags>"),
+        "{body}"
+    );
+    assert!(!body.contains("LocationConstraint"), "{body}");
+}

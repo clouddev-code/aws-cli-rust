@@ -43,6 +43,8 @@ struct Args {
     exact_timestamps: bool,
     index_document: Option<String>,
     error_document: Option<String>,
+    /// `--tags key value`, repeatable.
+    tags: Vec<(String, String)>,
     /// (include?, pattern) in command-line order.
     filters: Vec<(bool, String)>,
     page_size: Option<i64>,
@@ -76,7 +78,7 @@ fn allowed(command: &str) -> &'static [&'static str] {
             "--human-readable",
             "--summarize",
         ],
-        "mb" => &[],
+        "mb" => &["--tags"],
         "rb" => &["--force"],
         "presign" => &["--expires-in"],
         "rm" => &[
@@ -101,6 +103,7 @@ fn allowed(command: &str) -> &'static [&'static str] {
             "--content-type",
             "--metadata",
             "--no-guess-mime-type",
+            "--tags",
         ],
         "mv" => &[
             "--recursive",
@@ -115,6 +118,7 @@ fn allowed(command: &str) -> &'static [&'static str] {
             "--content-type",
             "--metadata",
             "--no-guess-mime-type",
+            "--tags",
         ],
         "sync" => &[
             "--dryrun",
@@ -128,6 +132,7 @@ fn allowed(command: &str) -> &'static [&'static str] {
             "--content-type",
             "--metadata",
             "--no-guess-mime-type",
+            "--tags",
             "--delete",
             "--size-only",
             "--exact-timestamps",
@@ -155,6 +160,20 @@ fn parse_args(command: &str, tokens: &[String]) -> Result<Args, Failure> {
         };
         if !ok.contains(&flag) {
             unknown.push(t.clone());
+            continue;
+        }
+        if flag == "--tags" {
+            match (tokens.get(i), tokens.get(i + 1)) {
+                (Some(k), Some(v)) => {
+                    a.tags.push((k.clone(), v.clone()));
+                    i += 2;
+                }
+                _ => {
+                    return Err(Failure::usage(
+                        "aws: error: argument --tags: expected 2 arguments",
+                    ));
+                }
+            }
             continue;
         }
         if FLAGS.contains(&flag) {
@@ -633,9 +652,25 @@ impl S3<'_, '_> {
         let mut params = Map::new();
         params.insert("Bucket".into(), Value::Str(bucket.clone()));
         let region = &self.client.config.region;
+        let mut cfg = Map::new();
         if region != "us-east-1" {
-            let mut cfg = Map::new();
             cfg.insert("LocationConstraint".into(), Value::Str(region.clone()));
+        }
+        if !self.args.tags.is_empty() {
+            let tags = self
+                .args
+                .tags
+                .iter()
+                .map(|(k, v)| {
+                    let mut t = Map::new();
+                    t.insert("Key".into(), Value::Str(k.clone()));
+                    t.insert("Value".into(), Value::Str(v.clone()));
+                    Value::Map(t)
+                })
+                .collect();
+            cfg.insert("Tags".into(), Value::List(tags));
+        }
+        if !cfg.is_empty() {
             params.insert("CreateBucketConfiguration".into(), Value::Map(cfg));
         }
         match self.call("CreateBucket", params) {
@@ -855,6 +890,14 @@ impl S3<'_, '_> {
         });
         if let Some(ct) = content_type {
             extra.insert("ContentType".into(), Value::Str(ct));
+        }
+        // `_set_tagging_params`; only uploads take tags (checked earlier).
+        if local.is_some() && !self.args.tags.is_empty() {
+            let pairs = self.args.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+            extra.insert(
+                "Tagging".into(),
+                Value::Str(crate::util::encode_pairs(pairs)),
+            );
         }
         if let Some(raw) = &self.args.metadata {
             let model = self.client.model;
@@ -1240,14 +1283,26 @@ impl S3<'_, '_> {
     }
 
     fn direction(&self, src: &str, dest: &str, usage: &str) -> Result<Direction, Failure> {
-        match (src.starts_with("s3://"), dest.starts_with("s3://")) {
-            (false, true) => Ok(Direction::Upload),
-            (true, false) => Ok(Direction::Download),
-            (true, true) => Ok(Direction::Copy),
-            (false, false) => Err(Failure::usage(format!(
-                "usage: aws s3 {usage}\nError: Invalid argument type"
-            ))),
+        let dir = match (src.starts_with("s3://"), dest.starts_with("s3://")) {
+            (false, true) => Direction::Upload,
+            (true, false) => Direction::Download,
+            (true, true) => Direction::Copy,
+            (false, false) => {
+                return Err(Failure::usage(format!(
+                    "usage: aws s3 {usage}\nError: Invalid argument type"
+                )));
+            }
+        };
+        if !self.args.tags.is_empty() && !matches!(dir, Direction::Upload) {
+            let received = match dir {
+                Direction::Download => "<S3Uri> <LocalPath>",
+                _ => "<S3Uri> <S3Uri>",
+            };
+            return Err(Failure::usage(format!(
+                "Expected tags parameter to be used with one of following path formats: <LocalPath> <S3Uri>. Instead, received {received}."
+            )));
         }
+        Ok(dir)
     }
 
     /// Files below a local directory, filtered relative to it.
