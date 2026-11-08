@@ -1673,6 +1673,12 @@ fn control_characters_are_escaped_on_a_terminal() {
         out.contains("\\x1b[31mEVIL") && !out.contains('\u{1b}'),
         "{out:?}"
     );
+    // JSON: DEL and C1 (8-bit CSI) as \u escapes, still the same JSON.
+    let xml_c1 = "<GetCallerIdentityResponse><GetCallerIdentityResult><UserId>a\u{9b}31mb\u{7f}</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>";
+    let (_, out, _) = run_tty(&["sts", "get-caller-identity"], vec![ok(xml_c1)], true).unwrap();
+    assert!(out.contains("a\\u009b31mb\\u007f"), "{out:?}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["UserId"], "a\u{9b}31mb\u{7f}");
     // Error messages on stderr.
     let err_xml = "<ErrorResponse><Error><Code>Bad</Code><Message>\u{1b}]0;pwned\u{7}</Message></Error></ErrorResponse>";
     let (code, _, err) = run_tty(
@@ -1686,4 +1692,39 @@ fn control_characters_are_escaped_on_a_terminal() {
         err.contains("\\x1b]0;pwned\\x07") && !err.contains('\u{1b}'),
         "{err:?}"
     );
+}
+
+#[test]
+fn help_parameter_matches_help_command() {
+    for (with_flag, with_word) in [
+        (vec!["--help"], vec!["help"]),
+        (vec!["sts", "--help"], vec!["sts", "help"]),
+        (
+            vec!["sts", "get-caller-identity", "--help"],
+            vec!["sts", "get-caller-identity", "help"],
+        ),
+        (
+            vec!["ec2", "wait", "instance-running", "--help"],
+            vec!["ec2", "wait", "instance-running", "help"],
+        ),
+        (
+            vec![
+                "ec2",
+                "describe-instances",
+                "--instance-ids",
+                "i-1",
+                "--query",
+                "--help",
+            ],
+            vec!["ec2", "describe-instances", "help"],
+        ),
+    ] {
+        let Some(a) = run(&with_flag, vec![]) else {
+            return;
+        };
+        let b = run(&with_word, vec![]).unwrap();
+        assert_eq!(a.code, 0, "{with_flag:?}: {}", a.stderr);
+        assert_eq!(a.stdout, b.stdout, "{with_flag:?}");
+        assert!(a.requests.is_empty());
+    }
 }

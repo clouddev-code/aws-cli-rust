@@ -39,6 +39,8 @@ pub struct Globals {
     pub cli_binary_format: Option<String>,
     pub no_cli_pager: bool,
     pub cli_error_format: Option<String>,
+    /// `--help`: the same page as `help` at that level (aws-cli 2.39.6).
+    pub help: bool,
 }
 
 const GLOBAL_FLAGS: &[&str] = &[
@@ -50,6 +52,7 @@ const GLOBAL_FLAGS: &[&str] = &[
     "--no-cli-pager",
     "--cli-auto-prompt",
     "--no-cli-auto-prompt",
+    "--help",
 ];
 
 const GLOBAL_VALUES: &[&str] = &[
@@ -92,6 +95,7 @@ pub fn split_globals(argv: &[String]) -> Result<(Globals, Vec<String>), UsageErr
                 "--version" => g.version = true,
                 "--no-sign-request" => g.no_sign_request = true,
                 "--no-cli-pager" => g.no_cli_pager = true,
+                "--help" => g.help = true,
                 _ => {}
             }
             i += 1;
@@ -101,6 +105,13 @@ pub fn split_globals(argv: &[String]) -> Result<(Globals, Vec<String>), UsageErr
             let value = match inline {
                 Some(v) => v,
                 None => {
+                    // `--query --help`: the option has no value, but help
+                    // is shown anyway (`MainArgParser._parse_help_request`).
+                    if argv.get(i + 1).map(String::as_str) == Some("--help") {
+                        g.help = true;
+                        i += 2;
+                        continue;
+                    }
                     i += 1;
                     argv.get(i).cloned().ok_or_else(|| {
                         UsageError(format!("argument {flag}: expected one argument"))
@@ -449,6 +460,9 @@ mod tests {
         assert_eq!(g.output.as_deref(), Some("text"));
         assert!(g.debug);
         assert_eq!(rest, s(&["ec2", "describe-instances"]));
+        let (g, rest) = split_globals(&s(&["s3api", "--query", "--help"])).unwrap();
+        assert!(g.help && g.query.is_none());
+        assert_eq!(rest, s(&["s3api"]));
     }
 
     #[test]

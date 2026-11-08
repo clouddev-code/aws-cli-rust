@@ -137,7 +137,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `--generate-cli-skeleton output` は本家と違い、生成した応答をモデルで検証しない (本家は検証に失敗して出力できない操作がある)。
 - waiter で `--starting-token` / `--page-size` / `--max-items` を指定しても無視する。
 - help: 太字・下線は再現しない。本家 (docutils) の癖のうち、リンク直後の ` .` や docutils の警告文は再現しない。HTML 内の見出し (`<h3>` 等) の位置が少し違う。`aws help topics` は未実装。
-- 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
+- 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する。JSON では DEL と C1 も `\u009b` のようにエスケープする (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
 - `login` / `sso login` のローカルコールバックは `/oauth/callback` 以外のパスに 404 を返して待ち続ける (本家はパスを確認しない。issue #5)。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
 - `auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`) は未対応で、エンドポイント / モデルが示す先頭の対応方式を使う。
@@ -169,6 +169,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
   set -x AWS_DEFAULT_REGION us-east-1; /tmp/awscli-venv/bin/python tests/fixtures/skeleton/generate.py > tests/fixtures/skeleton/cases.json
   ```
 - ureq は `gzip` 機能を外し、`Accept-Encoding: identity` を送る (botocore = http.client と同じ)。自動解凍されると DynamoDB の `x-amz-crc32` やフレキシブルチェックサムの照合が本文と合わなくなるため。
+- `assets/cli.json` は `scripts/upstream.sh update` が参照中のリリースから複製する (本家 2.39.6 で `--help` が追加された)。
 - `assets/cli.json` は aws-cli の `awscli/data/cli.json` (グローバル引数の説明) の複製。
 - 本家への追従: `upstream.lock` に aws-cli のリリースタグとコミットを記録する。`scripts/upstream.sh` (`fetch` / `latest` / `update`) と `make fetch-upstream` / `make update-upstream`。`update` はサービス・オペレーションの増減と CHANGELOG の該当範囲を `target/upstream-summary.md` に書く。build.rs は lock のタグを `--version` に埋め込み、手元の参照が lock と違えば警告する。`.github/workflows/upstream-sync.yml` が週 1 回これを実行して PR を作る (テスト失敗時は下書き PR)。自動で取り込まれるのはモデル・paginator・waiter・examples まで。手で移植した表 (argrename など) とロジックの変更は対象外。
 

@@ -46,6 +46,7 @@ const GLOBAL_FLAGS: &[&str] = &[
     "--cli-binary-format",
     "--no-cli-pager",
     "--cli-error-format",
+    "--help",
 ];
 
 fn regions(loader: &Loader) -> Vec<String> {

@@ -38,9 +38,10 @@ pub struct RenderOptions {
     pub terminal_width: usize,
     /// `--color on`, or `auto` on a terminal (`ColorizedStyler`).
     pub color: bool,
-    /// Show control characters in response strings as `\x1b`-style escapes
-    /// (text and table output to a terminal; JSON and YAML escape them
-    /// anyway). awscli prints them raw; see issue #4.
+    /// Keep control characters in response strings off the terminal: text
+    /// and table show them as `\x1b`-style escapes, JSON as `\u009b`
+    /// (serde_json already escapes C0), YAML escapes them anyway. awscli
+    /// prints them raw; see issue #4.
     pub escape_controls: bool,
 }
 
@@ -123,6 +124,19 @@ pub fn write(
             let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
             let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
             serde::Serialize::serialize(data, &mut ser).map_err(std::io::Error::other)?;
+            if table.escape_controls {
+                // serde_json escapes C0 but writes DEL and C1 (such as the
+                // 8-bit CSI U+009B) raw; keep them off the terminal too.
+                let text = String::from_utf8(buf).map_err(std::io::Error::other)?;
+                buf = text
+                    .chars()
+                    .map(|c| match c {
+                        '\u{7f}'..='\u{9f}' => format!("\\u{:04x}", c as u32),
+                        c => c.to_string(),
+                    })
+                    .collect::<String>()
+                    .into_bytes();
+            }
             out.write_all(&buf)?;
             out.write_all(b"\n")
         }

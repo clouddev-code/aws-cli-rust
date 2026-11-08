@@ -94,6 +94,19 @@ fn run_inner(
         );
         return Ok(());
     }
+    // `--help` anywhere shows the help of the command it follows, like
+    // `help` after the command words.
+    let rest: Vec<String> = if globals.help {
+        let mut words: Vec<String> = rest
+            .iter()
+            .take_while(|t| !t.starts_with("--"))
+            .cloned()
+            .collect();
+        words.push("help".into());
+        words
+    } else {
+        rest
+    };
     let positionals: Vec<&String> = rest.iter().take_while(|t| !t.starts_with("--")).collect();
     let Some(command) = positionals.first().map(|s| s.as_str()) else {
         return Err(Failure::usage(

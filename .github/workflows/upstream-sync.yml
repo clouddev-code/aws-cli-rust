@@ -96,7 +96,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add upstream.lock
+          git add upstream.lock assets/cli.json
           git commit -m "Update aws-cli to $TAG"
           git push origin "$BRANCH"
           {
@@ -108,7 +108,7 @@ jobs:
             cat target/upstream-summary.md
             echo
             echo "Models, paginators, waiters and examples are embedded at build time,"
-            echo "so this pull request only moves \`upstream.lock\`. CLI logic changes in"
+            echo "so this pull request only moves \`upstream.lock\` (and \`assets/cli.json\`). CLI logic changes in"
             echo "the CHANGELOG (\`enhancement\`, \`feature\`, \`bugfix\` entries) are not"
             echo "picked up automatically. Run \`make fetch-upstream\` after merging."
             if [ "$STATUS" != "0" ]; then
