@@ -3,14 +3,15 @@
 
 mod common;
 
-use awsr::output::{OutputFormat, TableStyle, write};
+use awsr::output::{OutputFormat, RenderOptions, write};
 use serde_json::Value as J;
 
 fn render(format: OutputFormat, data: &J) -> Result<String, String> {
-    let style = TableStyle {
+    let style = RenderOptions {
         title: "OperationName".into(),
         terminal_width: 80,
         color: false,
+        escape_controls: false,
     };
     let mut buf = Vec::new();
     write(format, data, &style, &mut buf).map_err(|e| e.to_string())?;
@@ -74,10 +75,11 @@ fn formatters_match_awscli() {
 
 #[test]
 fn colorized_table() {
-    let style = TableStyle {
+    let style = RenderOptions {
         title: "Op".into(),
         terminal_width: 80,
         color: true,
+        escape_controls: false,
     };
     let mut buf = Vec::new();
     write(

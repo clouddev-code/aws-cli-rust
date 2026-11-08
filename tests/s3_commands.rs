@@ -59,6 +59,10 @@ struct Run {
 const CONFIG: &str = "[default]\nregion = us-east-1\ns3 =\n  max_concurrent_requests = 1\n";
 
 fn run_s3(args: &[&str], config: &str, handler: Handler) -> Option<Run> {
+    run_s3_with(args, config, handler, false)
+}
+
+fn run_s3_with(args: &[&str], config: &str, handler: Handler, tty: bool) -> Option<Run> {
     let loader = common::loader_or_skip()?;
     let transport = FakeS3 {
         handler,
@@ -84,7 +88,8 @@ fn run_s3(args: &[&str], config: &str, handler: Handler) -> Option<Run> {
         prompt: Box::new(|_| None),
         sleep: Box::new(|_| {}),
         open_browser: Box::new(|_| false),
-        stdout_is_tty: false,
+        stdout_is_tty: tty,
+        stderr_is_tty: tty,
         terminal_width: None,
         local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),
@@ -970,4 +975,95 @@ fn keys_mapping_to_one_local_file_are_downloaded_once() {
     );
     assert!(r.stderr.contains("Skipping file a//b.txt."), "{}", r.stderr);
     assert!(dir.join("a/b.txt").exists());
+}
+
+#[test]
+fn s3_output_escapes_control_characters_on_a_terminal() {
+    let list = "<ListBucketResult><Contents><Key>p/\u{1b}[2Jx.txt</Key><Size>1</Size><LastModified>2015-08-30T01:02:03.000Z</LastModified></Contents></ListBucketResult>";
+    let Some(r) = run_s3_with(
+        &["ls", "s3://bkt/p/"],
+        CONFIG,
+        Box::new(move |_| ok(list)),
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        r.stdout.contains("\\x1b[2Jx.txt") && !r.stdout.contains('\u{1b}'),
+        "{:?}",
+        r.stdout
+    );
+    let r = run_s3_with(
+        &["rm", "s3://bkt/p/", "--recursive", "--dryrun"],
+        CONFIG,
+        Box::new(move |_| ok(list)),
+        true,
+    )
+    .unwrap();
+    assert!(
+        r.stdout
+            .contains("(dryrun) delete: s3://bkt/p/\\x1b[2Jx.txt"),
+        "{:?}",
+        r.stdout
+    );
+}
+
+#[test]
+fn tags_on_uploads_and_buckets() {
+    let (dir, rel) = scratch("tags");
+    std::fs::write(dir.join("a.txt"), b"a").unwrap();
+    let a = format!("{rel}/a.txt");
+    let Some(r) = run_s3(
+        &[
+            "cp",
+            &a,
+            "s3://bkt/a.txt",
+            "--tags",
+            "env",
+            "prod",
+            "--tags",
+            "team",
+            "a b&c",
+        ],
+        CONFIG,
+        Box::new(|_| ok("")),
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        r.requests[0].header("x-amz-tagging"),
+        Some("env=prod&team=a%20b%26c")
+    );
+    // Only local-to-S3 transfers take tags.
+    let r = run_s3(
+        &["cp", "s3://bkt/a.txt", &a, "--tags", "k", "v"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    assert!(r.stderr.contains("Expected tags parameter to be used with one of following path formats: <LocalPath> <S3Uri>. Instead, received <S3Uri> <LocalPath>."), "{}", r.stderr);
+    assert!(r.requests.is_empty());
+    let r = run_s3(
+        &["cp", &a, "s3://bkt/a.txt", "--tags", "only-key"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 252);
+    // mb --tags in us-east-1 sends a configuration with just the tags.
+    let r = run_s3(
+        &["mb", "s3://new", "--tags", "env", "dev"],
+        CONFIG,
+        Box::new(|_| ok("")),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let body = String::from_utf8(r.requests[0].body.clone()).unwrap();
+    assert!(
+        body.contains("<Tags><Tag><Key>env</Key><Value>dev</Value></Tag></Tags>"),
+        "{body}"
+    );
+    assert!(!body.contains("LocationConstraint"), "{body}");
 }

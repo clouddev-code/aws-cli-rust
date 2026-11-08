@@ -47,7 +47,7 @@ src/
   timestamp.rs       iso8601 / rfc822 / unixTimestamp, Python isoformat 互換出力
   endpoint/mod.rs    エンドポイントルールエンジン (標準関数 12 種)
   sigv4.rs           AWS Signature V4 (通常 / S3 フレーバー) と SigV4a (ECDSA P-256)
-  checksum.rs        フレキシブルチェックサム (CRC32/CRC32C/CRC64NVME/SHA1/SHA256/SHA512/XXHASH64), aws-chunked
+  checksum.rs        フレキシブルチェックサム (CRC32/CRC32C/CRC64NVME/SHA1/SHA256/SHA512/XXHASH64/XXHASH3/XXHASH128), aws-chunked
   http.rs            Request / Response, Transport トレイト, ureq 実装
   protocol/
     ser.rs           query / ec2 / json / rest-json / rest-xml / smithy-rpc-v2-cbor シリアライザ
@@ -58,7 +58,7 @@ src/
   config.rs          ~/.aws/config, ~/.aws/credentials (INI + ネスト)
   context.rs         外部依存 (Transport, env, 時計, 入力, スリープ, ブラウザ, TTY) の注入口
   client.rs          モデル駆動の API クライアント (driver と認証情報プロバイダが共用)。検証, standard リトライ
-  commands.rs        login, sso login / sso logout
+  commands.rs        login, logout, sso login / sso logout
   s3/                aws s3 高レベルコマンド (mod.rs: cp / ls / mb / mv / presign / rb / rm / sync / website, transfer.rs: 並列転送とマルチパート, filters.rs: --include/--exclude, mime.rs: Content-Type 推測表)
   oauth.rs           PKCE, 認可コードのローカルコールバック受信 (127.0.0.1), JWT クレーム読み取り
   credentials/
@@ -86,7 +86,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 |---|---|---|
 | **P1** | 上記モジュール全体の MVP | **完了** |
 | **P2** | `--generate-cli-skeleton`, `--cli-input-yaml`, table/yaml/yaml-stream 出力 (`--color`), waiters, モデル入力バリデーション, リトライ (standard), ヘルプ文書の整形 | **完了** |
-| **P3** | assume-role, web-identity, SSO, `aws login` セッション, IMDS/コンテナ認証情報, ページャ, `login` (PKCE / `--remote`), `sso login` (PKCE / デバイスコード), `sso logout` | **完了** (`logout` コマンドは未実装) |
+| **P3** | assume-role, web-identity, SSO, `aws login` セッション, IMDS/コンテナ認証情報, ページャ, `login` (PKCE / `--remote`), `sso login` (PKCE / デバイスコード), `sso logout` | **完了** |
 | P4 | S3 のフレキシブルチェックサム (CRC32 等), `aws s3` 高レベルコマンド, smithy-rpc-v2-cbor, event stream, SigV4a | **下回り 4 項目は完了**。`aws s3` は cp / ls / mb / mv / presign / rb / rm / sync / website を実装 (マルチパート・並列) |
 | **P5** | モデル埋め込み (zstd 圧縮 + 事前変換), `handlers_registry` 相当の改名・非表示表, 補完 | **完了** |
 
@@ -111,7 +111,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/s3_commands.rs` (P4, mv / sync / website 追加分) | sync (アップロード: サイズと時刻の比較, `--delete` とフィルタ, `--size-only` / ダウンロード: ローカルが新しい場合だけ差し替える本家の規則, `--exact-timestamps`, ローカルの `--delete`, ダウンロード後の mtime), mv (ローカル削除, コピー後のコピー元削除, 失敗時は削除しない, 自分自身への mv の拒否), website (PutBucketWebsite) | 計 11 テスト 成功 |
 | `tests/s3_commands.rs` (P4) | リクエスト内容で応答する偽 S3 に対して ls (PRE / サイズ / 集計 / 空のとき 1), mb (LocationConstraint), rb --force, rm (フィルタ / dryrun), cp (アップロード: Content-Type 推測, マルチパート + CRC64NVME, パート失敗で Abort と終了コード 1 / ダウンロード: 再帰, レンジ GET, 親ディレクトリを指すキーの警告と終了コード 2, ディレクトリマーカーの除外 / S3 間コピー / 8 並列), presign (botocore と同じ URL) | 6 テスト 成功 |
 | `tests/completion.rs` (P5) | コマンド, オペレーション, waiter, 引数名 (非表示・使用済みを除く), 値 (選択肢, プロファイル, リージョン, enum) | 2 テスト 成功 |
-| チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 以外), aws-chunked の形式 | 成功 |
+| チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 を含む全アルゴリズム), aws-chunked の形式 | 成功 |
 | event stream 単体テスト | botocore `test_eventstream.py` の正常系・異常系ベクタ (CRC 不一致, 重複ヘッダ, ヘッダ長超過) | 成功 |
 | `oauth::tests::local_callback_server_receives_redirect` | 実際に 127.0.0.1 で待ち受けるコールバックサーバ (ポートを使うため `--ignored`) | サンドボックス外で成功 |
 
@@ -126,7 +126,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 ## 5. 既知の非互換・未対応
 
 - カスタマイズコマンド (`configure`, `ec2 run-instances --count` など) は未実装 (`login` / `sso login` / `sso logout` / `aws s3` の一部は実装済み)。
-- `aws s3` の cp / mv / sync の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size` のみ と、sync の `--delete --size-only --exact-timestamps` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks`, `--tags`, sync の `--no-overwrite` / `--case-conflict` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
+- `aws s3` の cp / mv / sync の引数は `--recursive --include --exclude --dryrun --quiet --only-show-errors --acl --storage-class --content-type --metadata --no-guess-mime-type --page-size --tags` と、sync の `--delete --size-only --exact-timestamps` のみ (SSE, `--expected-size`, stdin/stdout (`-`), `--no-follow-symlinks`, sync の `--no-overwrite` / `--case-conflict` などは未対応)。進捗表示 (`Completed ... remaining`) は出さない。`s3 <command> help` は未実装 (`s3 help` は一覧のみ)。
 - `aws s3`: レンジ GET による分割ダウンロードでは、本家のようなパートの CRC を結合した全体チェックサムの照合はしない (206 応答のチェックサム検証は省略)。Content-Type の推測は Python 組み込みの mimetypes 表 (システムの mime.types は読まない) を使う。
 - `aws s3 cp` の S3 間コピー: `--copy-props` は未対応。マルチパートコピー (`multipart_threshold` 以上) ではコピー元のメタデータを引き継がない (s3transfer 単体と同じ。本家 awscli は既定でコピー元の HeadObject から引き継ぐ)。
 - `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。応答本文も、オブジェクトやレンジの期待サイズ + 1 MiB を上限にする。
@@ -137,19 +137,18 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `--generate-cli-skeleton output` は本家と違い、生成した応答をモデルで検証しない (本家は検証に失敗して出力できない操作がある)。
 - waiter で `--starting-token` / `--page-size` / `--max-items` を指定しても無視する。
 - help: 太字・下線は再現しない。本家 (docutils) の癖のうち、リンク直後の ` .` や docutils の警告文は再現しない。HTML 内の見出し (`<h3>` 等) の位置が少し違う。`aws help topics` は未実装。
+- 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する。JSON では DEL と C1 も `\u009b` のようにエスケープする (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
+- `login` / `sso login` のローカルコールバックは `/oauth/callback` 以外のパスに 404 を返して待ち続ける (本家はパスを確認しない。issue #5)。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
-- `auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`) は未対応で、エンドポイント / モデルが示す先頭の対応方式を使う。
-- `logout` (aws login セッションの削除) は未実装。
 - `login` の対話はプレーンな標準入力で行う (本家のリージョン補完付きプロンプトや agent toolkit の案内は無い)。
 - `sso login` の vanity URL 解決 (`resolve_start_url`) は未対応で、設定の `sso_start_url` をそのまま使う。
 - 認証情報が何も無い環境では、本家と同様に IMDS へ問い合わせるため約 1 秒かかる。
-- チェックサムの XXHASH3 / XXHASH128 は未実装 (本家は awscrt)。指定すると `Unsupported checksum algorithm` になり、レスポンス検証では次の優先度のアルゴリズムを使う。
 - aws-chunked トレーラ付きの送信は、本文をメモリに持つため `Transfer-Encoding: chunked` ではなくエンコード後の `Content-Length` で送る (S3 はどちらも受け付ける)。
 - HTTP のリダイレクトはたどらない (botocore と同じく 3xx は応答として扱う)。ureq に任せると `X-Amz-Security-Token` などがリダイレクト先ホストへ送られるため (oss-scan 指摘)。
 - 応答本文の上限: 通常の API 応答 512 MiB、IMDS / コンテナ認証情報 1 MiB。超えたらリトライせずエラー。ストリーミング出力 (`get-object` の outfile, event stream) は上限なしでメモリに読む (Transport のストリーミング化までの制限)。
 - HTTP 本文はメモリに読み切る。`s3api get-object` の `outfile` や event stream は応答全体を受け取ってから処理するため、`logs start-live-tail` のような終わりの無いストリームは扱えない (`start-live-tail` 自体も未実装)。
 - 本家 CLI が削除している event stream 操作 (`lambda invoke-with-response-stream`, `bedrock-runtime converse-stream` など) も表示され、イベントの一覧を JSON で出力する。
-- `--no-verify-ssl`, `--ca-bundle`, `--cli-error-format` は受け付けるが効果がない。
+- `--cli-error-format` は受け付けるが効果がない (エラーは従来形式で表示する)。`--no-verify-ssl` と `--ca-bundle` (`AWS_CA_BUNDLE`, `ca_bundle`) は対応済み。
 - text 出力で `--query` を使う場合、本家はページごとに適用するが、awsr は集約後に 1 回適用する。
 
 ## 6. 開発環境メモ
@@ -167,6 +166,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
   set -x AWS_DEFAULT_REGION us-east-1; /tmp/awscli-venv/bin/python tests/fixtures/skeleton/generate.py > tests/fixtures/skeleton/cases.json
   ```
 - ureq は `gzip` 機能を外し、`Accept-Encoding: identity` を送る (botocore = http.client と同じ)。自動解凍されると DynamoDB の `x-amz-crc32` やフレキシブルチェックサムの照合が本文と合わなくなるため。
+- `assets/cli.json` は `scripts/upstream.sh update` が参照中のリリースから複製する (本家 2.39.6 で `--help` が追加された)。
 - `assets/cli.json` は aws-cli の `awscli/data/cli.json` (グローバル引数の説明) の複製。
 - 本家への追従: `upstream.lock` に aws-cli のリリースタグとコミットを記録する。`scripts/upstream.sh` (`fetch` / `latest` / `update`) と `make fetch-upstream` / `make update-upstream`。`update` はサービス・オペレーションの増減と CHANGELOG の該当範囲を `target/upstream-summary.md` に書く。build.rs は lock のタグを `--version` に埋め込み、手元の参照が lock と違えば警告する。`.github/workflows/upstream-sync.yml` が週 1 回これを実行して PR を作る (テスト失敗時は下書き PR)。自動で取り込まれるのはモデル・paginator・waiter・examples まで。手で移植した表 (argrename など) とロジックの変更は対象外。
 

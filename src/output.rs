@@ -30,14 +30,52 @@ impl OutputFormat {
     }
 }
 
-/// What the table formatter needs besides the data.
+/// How a result is rendered, besides the format.
 #[derive(Debug, Clone, Default)]
-pub struct TableStyle {
-    /// Section title of the whole table: the operation name.
+pub struct RenderOptions {
+    /// Section title of a table: the operation name.
     pub title: String,
     pub terminal_width: usize,
     /// `--color on`, or `auto` on a terminal (`ColorizedStyler`).
     pub color: bool,
+    /// Keep control characters in response strings off the terminal: text
+    /// and table show them as `\x1b`-style escapes, JSON as `\u009b`
+    /// (serde_json already escapes C0), YAML escapes them anyway. awscli
+    /// prints them raw; see issue #4.
+    pub escape_controls: bool,
+}
+
+/// `s` with control characters other than newline and tab (C0, DEL, C1)
+/// written as `\xNN`, so response data cannot drive the terminal.
+pub fn terminal_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    let is_control =
+        |c: char| (c.is_control() && c != '\n' && c != '\t') || ('\u{80}'..='\u{9f}').contains(&c);
+    if !s.chars().any(is_control) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if is_control(c) {
+            out.push_str(&format!("\\x{:02x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// A copy of `v` with [`terminal_safe`] applied to strings and keys.
+fn escape_controls(v: &J) -> J {
+    match v {
+        J::String(s) => J::String(terminal_safe(s).into_owned()),
+        J::Array(a) => J::Array(a.iter().map(escape_controls).collect()),
+        J::Object(o) => J::Object(
+            o.iter()
+                .map(|(k, v)| (terminal_safe(k).into_owned(), escape_controls(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 pub fn apply_query(expr: &str, data: &J) -> Result<J, String> {
@@ -51,10 +89,18 @@ pub fn apply_query(expr: &str, data: &J) -> Result<J, String> {
 pub fn write(
     format: OutputFormat,
     data: &J,
-    table: &TableStyle,
+    table: &RenderOptions,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
     let empty = data == &J::Object(Default::default());
+    let escaped;
+    let data =
+        if table.escape_controls && matches!(format, OutputFormat::Text | OutputFormat::Table) {
+            escaped = escape_controls(data);
+            &escaped
+        } else {
+            data
+        };
     match format {
         OutputFormat::Off => Ok(()),
         OutputFormat::Table => {
@@ -78,6 +124,19 @@ pub fn write(
             let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
             let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
             serde::Serialize::serialize(data, &mut ser).map_err(std::io::Error::other)?;
+            if table.escape_controls {
+                // serde_json escapes C0 but writes DEL and C1 (such as the
+                // 8-bit CSI U+009B) raw; keep them off the terminal too.
+                let text = String::from_utf8(buf).map_err(std::io::Error::other)?;
+                buf = text
+                    .chars()
+                    .map(|c| match c {
+                        '\u{7f}'..='\u{9f}' => format!("\\u{:04x}", c as u32),
+                        c => c.to_string(),
+                    })
+                    .collect::<String>()
+                    .into_bytes();
+            }
             out.write_all(&buf)?;
             out.write_all(b"\n")
         }
@@ -216,7 +275,7 @@ mod tests {
 
     fn text(v: J) -> String {
         let mut buf = Vec::new();
-        write(OutputFormat::Text, &v, &TableStyle::default(), &mut buf).unwrap();
+        write(OutputFormat::Text, &v, &RenderOptions::default(), &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -236,9 +295,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_safe_escapes_controls() {
+        assert_eq!(terminal_safe("plain\ttext\n"), "plain\ttext\n");
+        assert_eq!(
+            terminal_safe("a\u{1b}[31mb\u{7f}c\u{9b}d\re"),
+            "a\\x1b[31mb\\x7fc\\x9bd\\x0de"
+        );
+    }
+
+    #[test]
     fn json_output_and_query() {
         let mut buf = Vec::new();
-        let style = TableStyle::default();
+        let style = RenderOptions::default();
         write(
             OutputFormat::Json,
             &json!({"A": [1, "ü"]}),

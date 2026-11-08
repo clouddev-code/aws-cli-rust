@@ -42,6 +42,7 @@ SYNOPSIS
           [--cli-auto-prompt]
           [--no-cli-auto-prompt]
           [--cli-error-format <value>]
+          [--help]
 
 OPTIONS
        --cli-input-json | --cli-input-yaml (string) Reads arguments from the
@@ -190,6 +191,10 @@ GLOBAL OPTIONS
        o table
 
        o enhanced
+
+       --help (boolean)
+
+       Display help for the command/subcommand.
 
 EXAMPLES
        NOTE:

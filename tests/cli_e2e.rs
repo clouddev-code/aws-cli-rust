@@ -104,6 +104,7 @@ fn test_context<'a>(
         sleep: Box::new(|_| {}),
         open_browser: Box::new(|_| false),
         stdout_is_tty: false,
+        stderr_is_tty: false,
         terminal_width: None,
         local_time: Box::new(|t| t.naive_utc()),
         random: Box::new(|n| vec![7; n]),
@@ -1612,4 +1613,196 @@ fn help_pages_match_awscli_man_output() {
     let r = run(&["help"], vec![]).unwrap();
     assert!(r.stdout.contains("AVAILABLE SERVICES"));
     assert!(r.stdout.contains("       o s3api\n"));
+}
+
+#[test]
+fn control_characters_are_escaped_on_a_terminal() {
+    let xml = "<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn</Arn><UserId>\u{1b}[31mEVIL\u{1b}[0m</UserId><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>";
+    let run_tty = |args: &[&str], responses: Vec<Response>, tty: bool| {
+        let loader = common::loader_or_skip()?;
+        let transport = FakeTransport::new(responses);
+        let mut env = default_env();
+        env.insert("AWS_PAGER".into(), String::new());
+        let mut ctx = test_context(loader, &transport, env);
+        ctx.stdout_is_tty = tty;
+        ctx.stderr_is_tty = tty;
+        let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = driver::run(&ctx, &argv, &mut out, &mut err);
+        Some((
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        ))
+    };
+    let Some((code, out, _)) = run_tty(
+        &["sts", "get-caller-identity", "--output", "text"],
+        vec![ok(xml)],
+        true,
+    ) else {
+        return;
+    };
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("\\x1b[31mEVIL\\x1b[0m") && !out.contains('\u{1b}'),
+        "{out:?}"
+    );
+    // Not a terminal: the data is passed through unchanged.
+    let (_, out, _) = run_tty(
+        &["sts", "get-caller-identity", "--output", "text"],
+        vec![ok(xml)],
+        false,
+    )
+    .unwrap();
+    assert!(out.contains("\u{1b}[31mEVIL"), "{out:?}");
+    // Table (color off): cells are escaped, the frame is intact.
+    let (_, out, _) = run_tty(
+        &[
+            "sts",
+            "get-caller-identity",
+            "--output",
+            "table",
+            "--color",
+            "off",
+        ],
+        vec![ok(xml)],
+        true,
+    )
+    .unwrap();
+    assert!(
+        out.contains("\\x1b[31mEVIL") && !out.contains('\u{1b}'),
+        "{out:?}"
+    );
+    // JSON: DEL and C1 (8-bit CSI) as \u escapes, still the same JSON.
+    let xml_c1 = "<GetCallerIdentityResponse><GetCallerIdentityResult><UserId>a\u{9b}31mb\u{7f}</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>";
+    let (_, out, _) = run_tty(&["sts", "get-caller-identity"], vec![ok(xml_c1)], true).unwrap();
+    assert!(out.contains("a\\u009b31mb\\u007f"), "{out:?}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["UserId"], "a\u{9b}31mb\u{7f}");
+    // Error messages on stderr.
+    let err_xml = "<ErrorResponse><Error><Code>Bad</Code><Message>\u{1b}]0;pwned\u{7}</Message></Error></ErrorResponse>";
+    let (code, _, err) = run_tty(
+        &["sts", "get-caller-identity"],
+        vec![status(400, err_xml)],
+        true,
+    )
+    .unwrap();
+    assert_eq!(code, 254);
+    assert!(
+        err.contains("\\x1b]0;pwned\\x07") && !err.contains('\u{1b}'),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn help_parameter_matches_help_command() {
+    for (with_flag, with_word) in [
+        (vec!["--help"], vec!["help"]),
+        (vec!["sts", "--help"], vec!["sts", "help"]),
+        (
+            vec!["sts", "get-caller-identity", "--help"],
+            vec!["sts", "get-caller-identity", "help"],
+        ),
+        (
+            vec!["ec2", "wait", "instance-running", "--help"],
+            vec!["ec2", "wait", "instance-running", "help"],
+        ),
+        (
+            vec![
+                "ec2",
+                "describe-instances",
+                "--instance-ids",
+                "i-1",
+                "--query",
+                "--help",
+            ],
+            vec!["ec2", "describe-instances", "help"],
+        ),
+    ] {
+        let Some(a) = run(&with_flag, vec![]) else {
+            return;
+        };
+        let b = run(&with_word, vec![]).unwrap();
+        assert_eq!(a.code, 0, "{with_flag:?}: {}", a.stderr);
+        assert_eq!(a.stdout, b.stdout, "{with_flag:?}");
+        assert!(a.requests.is_empty());
+    }
+}
+
+#[test]
+fn xxhash3_and_xxhash128_checksums() {
+    let file = temp_file("put-xx.txt", b"hello world");
+    for (alg, header, value) in [
+        ("XXHASH3", "x-amz-checksum-xxhash3", "1Eex6kDmmIs="),
+        (
+            "XXHASH128",
+            "x-amz-checksum-xxhash128",
+            "340J6T+HSQCpm4d1zBW2xw==",
+        ),
+    ] {
+        let Some(r) = run(
+            &[
+                "s3api",
+                "put-object",
+                "--bucket",
+                "b1",
+                "--key",
+                "k",
+                "--body",
+                file.to_str().unwrap(),
+                "--checksum-algorithm",
+                alg,
+            ],
+            vec![ok("")],
+        ) else {
+            return;
+        };
+        assert_eq!(r.code, 0, "{alg}: {}", r.stderr);
+        let req = &r.requests[0];
+        assert_eq!(req.header("X-Amz-Trailer"), Some(header));
+        assert_eq!(
+            body(req),
+            format!("b\r\nhello world\r\n0\r\n{header}:{value}\r\n\r\n")
+        );
+    }
+}
+
+#[test]
+fn auth_scheme_preference_reorders_the_service_schemes() {
+    let xml = "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>";
+    let auth = |env: HashMap<String, String>, config: &str| {
+        let r = run_with(
+            &["sts", "get-caller-identity"],
+            vec![ok(xml)],
+            env,
+            SharedConfig::from_parts(&parse_ini(config), Default::default()),
+        )?;
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        Some(
+            r.requests[0]
+                .header("Authorization")
+                .unwrap()
+                .split(' ')
+                .next()
+                .unwrap()
+                .to_string(),
+        )
+    };
+    // STS lists sigv4 then sigv4a.
+    let Some(default) = auth(default_env(), "") else {
+        return;
+    };
+    assert_eq!(default, "AWS4-HMAC-SHA256");
+    let mut env = default_env();
+    env.insert("AWS_AUTH_SCHEME_PREFERENCE".into(), "sigv4a, sigv4".into());
+    assert_eq!(auth(env, "").unwrap(), "AWS4-ECDSA-P256-SHA256");
+    // From the profile; unknown or unsupported names are skipped.
+    assert_eq!(
+        auth(
+            default_env(),
+            "[default]\nauth_scheme_preference = httpBearerAuth,sigv4a\n"
+        )
+        .unwrap(),
+        "AWS4-ECDSA-P256-SHA256"
+    );
 }

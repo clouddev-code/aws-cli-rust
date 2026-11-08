@@ -66,7 +66,13 @@ pub fn run(ctx: &Context, argv: &[String], out: &mut dyn Write, err: &mut dyn Wr
         Ok(()) => exit::OK,
         Err(f) => {
             if !f.message.is_empty() {
-                let _ = writeln!(err, "{}", f.message);
+                // Error text can carry response data (issue #4).
+                let message = if ctx.stderr_is_tty {
+                    output::terminal_safe(&f.message)
+                } else {
+                    f.message.as_str().into()
+                };
+                let _ = writeln!(err, "{message}");
             }
             f.code
         }
@@ -88,6 +94,19 @@ fn run_inner(
         );
         return Ok(());
     }
+    // `--help` anywhere shows the help of the command it follows, like
+    // `help` after the command words.
+    let rest: Vec<String> = if globals.help {
+        let mut words: Vec<String> = rest
+            .iter()
+            .take_while(|t| !t.starts_with("--"))
+            .cloned()
+            .collect();
+        words.push("help".into());
+        words
+    } else {
+        rest
+    };
     let positionals: Vec<&String> = rest.iter().take_while(|t| !t.starts_with("--")).collect();
     let Some(command) = positionals.first().map(|s| s.as_str()) else {
         return Err(Failure::usage(
@@ -97,7 +116,7 @@ fn run_inner(
     };
     if command == "help" {
         let mut commands = ctx.loader.command_names();
-        commands.push("login".into());
+        commands.extend(["login".to_string(), "logout".to_string()]);
         commands.sort();
         let page = crate::help::top_level(&commands);
         return emit(
@@ -118,6 +137,10 @@ fn run_inner(
                 message: String::new(),
             }),
         };
+    }
+    if command == "logout" {
+        let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
+        return crate::commands::logout(ctx, &profile_name(ctx, &globals), &tokens, out, err);
     }
     if command == "login" {
         let tokens: Vec<String> = rest.iter().skip(1).cloned().collect();
@@ -504,7 +527,7 @@ fn output_settings(
     ctx: &Context,
     globals: &Globals,
     title: &str,
-) -> Result<(OutputFormat, output::TableStyle), Failure> {
+) -> Result<(OutputFormat, output::RenderOptions), Failure> {
     let format = match globals
         .output
         .clone()
@@ -528,10 +551,11 @@ fn output_settings(
             )));
         }
     };
-    let style = output::TableStyle {
+    let style = output::RenderOptions {
         title: title.to_string(),
         terminal_width: ctx.terminal_width.unwrap_or(80),
         color,
+        escape_controls: ctx.stdout_is_tty,
     };
     Ok((format, style))
 }
@@ -727,6 +751,16 @@ pub(crate) fn service_client<'a>(
             .or_else(|| ctx.config.get(&profile, "sigv4a_signing_region_set"))
             .filter(|v| !v.is_empty()),
         retry: retry_config(ctx, &profile)?,
+        auth_scheme_preference: ctx
+            .env_var("AWS_AUTH_SCHEME_PREFERENCE")
+            .or_else(|| ctx.config.get(&profile, "auth_scheme_preference"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     Client::new(ctx, model, config, credentials).map_err(Failure::general)
 }

@@ -100,7 +100,7 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - 認証情報 (本家と同じ順序): 環境変数、assume-role (`source_profile` / `credential_source` / MFA / ロールチェーン)、web identity、IAM Identity Center (SSO)、`aws login` セッション、`~/.aws/credentials`、`credential_process`、`~/.aws/config`、コンテナ、EC2 インスタンスメタデータ (IMDSv2)
 - 一時認証情報は本家と同じ `~/.aws/cli/cache` / `~/.aws/sso/cache` / `~/.aws/login/cache` を読み書きするので、本家 `aws` とキャッシュを共有できます
 - `login` (ブラウザ + PKCE、`--remote` でコード貼り付け) — 本家 `aws login` と同じキャッシュとプロファイル設定 (`login_session`) を作成
-- `sso login` (sso-session 構成では PKCE、`--use-device-code` でデバイスコード方式) / `sso logout`
+- `sso login` (sso-session 構成では PKCE、`--use-device-code` でデバイスコード方式) / `sso logout` / `logout` (`aws login` セッションの削除、`--all`)
 - ページャ (`AWS_PAGER` → `cli_pager` → `PAGER` → `less`、端末出力のときだけ、`--no-cli-pager` で無効)
 - 引数: スカラー、リスト、JSON、shorthand 構文、`file://` / `fileb://`、`--cli-input-json` / `--cli-input-yaml`、blob の base64 (`--cli-binary-format`)
 - 本家の引数・コマンドの改名と非表示 (`ec2 create-image --reboot`、`sns subscribe --notification-endpoint`、削除されたコマンドなど)
@@ -108,10 +108,12 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - リトライ: standard モード (最大 3 回、指数バックオフ + ジッタ、リトライクォータ)。`retry_mode` / `max_attempts` (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`)
 - 自動ページング、`--max-items` / `--page-size` / `--starting-token`、`--no-paginate`
 - `wait` コマンド (waiters-2.json の全 waiter)
-- `aws s3`: cp / ls / mb / mv / presign / rb / rm / sync / website (`--recursive`、`--include` / `--exclude`、sync の `--delete` / `--size-only` / `--exact-timestamps`、マルチパート・並列転送。`[profile] s3 =` の `max_concurrent_requests` / `multipart_threshold` / `multipart_chunksize`)
+- `aws s3`: cp / ls / mb / mv / presign / rb / rm / sync / website (`--recursive`、`--include` / `--exclude`、sync の `--delete` / `--size-only` / `--exact-timestamps`、アップロードと mb の `--tags`、マルチパート・並列転送。`[profile] s3 =` の `max_concurrent_requests` / `multipart_threshold` / `multipart_chunksize`)
 - `--generate-cli-skeleton` (`input` / `yaml-input` / `output`)
 - 出力: json / text / table / yaml / yaml-stream / off、`--query` (JMESPath)、`--color` (table の色付け)
 - help: 本家の man ページと同じ構成 (説明、構文、オプション、グローバルオプション、例、出力)
+- TLS: `--no-verify-ssl`、`--ca-bundle` / `AWS_CA_BUNDLE` / プロファイルの `ca_bundle`
+- `--help` (どの階層でも `help` と同じページ)、`auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`)
 - 終了コード: 0 / 252 (引数エラー) / 253 (設定エラー) / 254 (サービスエラー) / 255 (その他)
 
 ## ライセンス

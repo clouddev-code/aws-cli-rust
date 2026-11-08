@@ -1,6 +1,6 @@
 use awsr::config::SharedConfig;
 use awsr::driver::{self, Context, exit};
-use awsr::http::UreqTransport;
+use awsr::http::{TlsOptions, UreqTransport};
 use std::io::{BufRead, IsTerminal, Write};
 use std::time::Duration;
 
@@ -113,9 +113,34 @@ fn terminal_width() -> Option<usize> {
     None
 }
 
+/// A global option's value from the raw arguments (`--flag v` or
+/// `--flag=v`); the transport is built before the command line is parsed.
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    let inline = format!("{flag}=");
+    args.iter().enumerate().find_map(|(i, a)| {
+        if a == flag {
+            args.get(i + 1).cloned()
+        } else {
+            a.strip_prefix(&inline).map(str::to_string)
+        }
+    })
+}
+
+/// `--ca-bundle` -> `AWS_CA_BUNDLE` -> the profile's `ca_bundle`.
+fn ca_bundle(args: &[String], config: &SharedConfig) -> Option<std::path::PathBuf> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let profile = arg_value(args, "--profile")
+        .or_else(|| env("AWS_PROFILE"))
+        .or_else(|| env("AWS_DEFAULT_PROFILE"))
+        .unwrap_or_else(|| "default".into());
+    arg_value(args, "--ca-bundle")
+        .or_else(|| env("AWS_CA_BUNDLE"))
+        .or_else(|| config.get(&profile, "ca_bundle"))
+        .map(std::path::PathBuf::from)
+}
+
 fn timeout(args: &[String], flag: &str) -> Option<Duration> {
-    let pos = args.iter().position(|a| a == flag)?;
-    let secs: u64 = args.get(pos + 1)?.parse().ok()?;
+    let secs: u64 = arg_value(args, flag)?.parse().ok()?;
     // 0 means "no timeout" in the AWS CLI.
     (secs > 0).then(|| Duration::from_secs(secs))
 }
@@ -168,13 +193,25 @@ fn main() {
             std::process::exit(exit::CONFIG);
         }
     };
-    let transport = UreqTransport::new(
+    let config = SharedConfig::load();
+    let tls = TlsOptions {
+        no_verify: args.iter().any(|a| a == "--no-verify-ssl"),
+        ca_bundle: ca_bundle(&args, &config),
+    };
+    let transport = match UreqTransport::new(
         timeout(&args, "--cli-connect-timeout").or(Some(Duration::from_secs(60))),
         timeout(&args, "--cli-read-timeout").or(Some(Duration::from_secs(60))),
-    );
+        &tls,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("\n{e}");
+            std::process::exit(exit::GENERAL);
+        }
+    };
     let ctx = Context {
         loader,
-        config: SharedConfig::load(),
+        config,
         env: Box::new(|k| std::env::var(k).ok()),
         transport: &transport,
         now: Box::new(chrono::Utc::now),
@@ -183,6 +220,7 @@ fn main() {
         sleep: Box::new(std::thread::sleep),
         open_browser: Box::new(open_browser),
         stdout_is_tty: std::io::stdout().is_terminal(),
+        stderr_is_tty: std::io::stderr().is_terminal(),
         terminal_width: terminal_width(),
         local_time: Box::new(|t| t.with_timezone(&chrono::Local).naive_local()),
         random: Box::new(awsr::oauth::os_random),

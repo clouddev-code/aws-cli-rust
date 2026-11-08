@@ -258,6 +258,9 @@ pub struct ClientConfig {
     /// `sigv4a_signing_region_set`
     pub sigv4a_signing_region_set: Option<String>,
     pub retry: RetryConfig,
+    /// `auth_scheme_preference` / `AWS_AUTH_SCHEME_PREFERENCE`: scheme names
+    /// (`sigv4a`, `sigv4`, ...) to use first when the service offers them.
+    pub auth_scheme_preference: Vec<String>,
 }
 
 pub struct Client<'a> {
@@ -639,11 +642,14 @@ impl<'a> Client<'a> {
         let mut region_set: Option<String> = None;
         let mut disable_double_encoding = false;
         if let Some(schemes) = props.get("authSchemes").and_then(J::as_array) {
-            let scheme = schemes.iter().find(|s| {
-                matches!(
-                    s.get("name").and_then(J::as_str),
-                    Some("sigv4" | "sigv4a" | "sigv4-s3express")
-                )
+            let names: Vec<&str> = schemes
+                .iter()
+                .map(|s| s.get("name").and_then(J::as_str).unwrap_or(""))
+                .collect();
+            let scheme = self.preferred_scheme(&names).and_then(|name| {
+                schemes
+                    .iter()
+                    .find(|s| s.get("name").and_then(J::as_str) == Some(name))
             });
             let Some(s) = scheme else {
                 let names: Vec<&str> = schemes
@@ -677,15 +683,18 @@ impl<'a> Client<'a> {
                 .and_then(J::as_bool)
                 .unwrap_or(false);
         } else {
-            let auth = op
+            let auth: Vec<&str> = op
                 .get("auth")
                 .or_else(|| self.model.metadata().get("auth"))
-                .and_then(J::as_array);
-            ctx.asymmetric = auth.and_then(|a| {
-                a.iter()
-                    .filter_map(J::as_str)
-                    .find(|t| matches!(*t, "aws.auth#sigv4" | "aws.auth#sigv4a"))
-            }) == Some("aws.auth#sigv4a");
+                .and_then(J::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(J::as_str)
+                        .map(|t| t.rsplit('#').next().unwrap_or(t))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ctx.asymmetric = self.preferred_scheme(&auth) == Some("sigv4a");
         }
         if ctx.asymmetric {
             // `_resolve_sigv4a_region`
@@ -698,6 +707,25 @@ impl<'a> Client<'a> {
         }
         ctx.s3 = disable_double_encoding || ctx.name.starts_with("s3");
         Ok(ctx)
+    }
+}
+
+impl Client<'_> {
+    /// The auth scheme to sign with among `available` (endpoint
+    /// `authSchemes` or the model's `auth` trait, without the `aws.auth#`
+    /// prefix): the first supported one, with `auth_scheme_preference`
+    /// entries the service offers moved to the front
+    /// (`resolve_auth_scheme_preference`).
+    fn preferred_scheme<'n>(&self, available: &[&'n str]) -> Option<&'n str> {
+        let supported = |n: &str| matches!(n, "sigv4" | "sigv4a" | "sigv4-s3express");
+        let preferred = self
+            .config
+            .auth_scheme_preference
+            .iter()
+            .filter_map(|p| available.iter().find(|a| **a == p.as_str()).copied());
+        preferred
+            .chain(available.iter().copied())
+            .find(|n| supported(n))
     }
 }
 

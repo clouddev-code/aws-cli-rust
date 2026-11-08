@@ -4,9 +4,9 @@
 #   scripts/upstream.sh fetch          check out the locked release
 #   scripts/upstream.sh latest         print the latest 2.x.y release tag
 #   scripts/upstream.sh update [TAG]   move to TAG (default: latest), rewrite
-#                                      upstream.lock and write a summary of
-#                                      the model changes to
-#                                      target/upstream-summary.md
+#                                      upstream.lock, refresh assets/cli.json
+#                                      and write a summary of the model
+#                                      changes to target/upstream-summary.md
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -76,6 +76,8 @@ update)
     commit=$(checkout "$new_tag")
     python3 scripts/upstream_summary.py snapshot "$DATA" target/upstream-new.json
     write_lock "$new_tag" "$commit"
+    # Global option docs used by help (src/help.rs embeds this copy).
+    cp "$REF/awscli/data/cli.json" assets/cli.json
     python3 scripts/upstream_summary.py report \
         target/upstream-old.json target/upstream-new.json \
         "$REF/CHANGELOG.rst" "$old_tag" "$new_tag" > target/upstream-summary.md

@@ -166,13 +166,54 @@ pub trait Transport: Sync {
     fn send(&self, req: &Request) -> Result<Response, TransportError>;
 }
 
+/// Certificate verification settings: `--no-verify-ssl`, and `--ca-bundle`
+/// / `AWS_CA_BUNDLE` / `ca_bundle` (the bundle replaces the built-in roots,
+/// as with botocore).
+#[derive(Debug, Clone, Default)]
+pub struct TlsOptions {
+    pub no_verify: bool,
+    pub ca_bundle: Option<std::path::PathBuf>,
+}
+
+impl TlsOptions {
+    fn config(&self) -> Result<ureq::tls::TlsConfig, String> {
+        let mut builder = ureq::tls::TlsConfig::builder().disable_verification(self.no_verify);
+        if let Some(path) = &self.ca_bundle {
+            let invalid = || {
+                format!(
+                    "Could not find a suitable TLS CA certificate bundle, invalid path: {}",
+                    path.display()
+                )
+            };
+            let pem = std::fs::read(path).map_err(|_| invalid())?;
+            let certs: Vec<ureq::tls::Certificate<'static>> = ureq::tls::parse_pem(&pem)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(c)) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            if certs.is_empty() {
+                return Err(invalid());
+            }
+            builder = builder.root_certs(ureq::tls::RootCerts::new_with_certs(&certs));
+        }
+        Ok(builder.build())
+    }
+}
+
 /// Real HTTPS transport backed by `ureq`.
 pub struct UreqTransport {
     agent: ureq::Agent,
+    tls: ureq::tls::TlsConfig,
 }
 
-fn agent(connect: Option<std::time::Duration>, read: Option<std::time::Duration>) -> ureq::Agent {
+fn agent(
+    connect: Option<std::time::Duration>,
+    read: Option<std::time::Duration>,
+    tls: &ureq::tls::TlsConfig,
+) -> ureq::Agent {
     ureq::Agent::config_builder()
+        .tls_config(tls.clone())
         .http_status_as_error(false)
         // Never follow redirects: ureq would re-send custom headers such as
         // X-Amz-Security-Token to the new host. botocore does not follow
@@ -191,10 +232,13 @@ impl UreqTransport {
     pub fn new(
         connect_timeout: Option<std::time::Duration>,
         read_timeout: Option<std::time::Duration>,
-    ) -> Self {
-        UreqTransport {
-            agent: agent(connect_timeout, read_timeout),
-        }
+        tls: &TlsOptions,
+    ) -> Result<Self, String> {
+        let tls = tls.config()?;
+        Ok(UreqTransport {
+            agent: agent(connect_timeout, read_timeout, &tls),
+            tls,
+        })
     }
 }
 
@@ -212,7 +256,7 @@ impl Transport for UreqTransport {
         let short;
         let agent = match req.timeout {
             Some(t) => {
-                short = agent(Some(t), Some(t));
+                short = agent(Some(t), Some(t), &self.tls);
                 &short
             }
             None => &self.agent,

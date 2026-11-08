@@ -2,7 +2,7 @@
 //! (custom auth headers would reach the new host) and response bodies are
 //! bounded.
 
-use awsr::http::{Request, Transport, UreqTransport};
+use awsr::http::{Request, TlsOptions, Transport, UreqTransport};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
@@ -57,7 +57,12 @@ fn redirects_are_returned_not_followed() {
     let mut req = Request::for_url("POST", &url);
     req.set_header("X-Amz-Security-Token", "SECRET");
     req.body = b"Action=GetCallerIdentity".to_vec();
-    let transport = UreqTransport::new(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)));
+    let transport = UreqTransport::new(
+        Some(Duration::from_secs(5)),
+        Some(Duration::from_secs(5)),
+        &TlsOptions::default(),
+    )
+    .unwrap();
     let resp = transport.send(&req).unwrap();
     assert_eq!(resp.status, 302);
     // Header names go out lowercased.
@@ -81,7 +86,12 @@ fn response_bodies_are_bounded() {
     reply.extend(&body);
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let server = serve_once(listener, reply.clone());
-    let transport = UreqTransport::new(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)));
+    let transport = UreqTransport::new(
+        Some(Duration::from_secs(5)),
+        Some(Duration::from_secs(5)),
+        &TlsOptions::default(),
+    )
+    .unwrap();
     let mut req = Request::for_url("GET", &url);
     req.max_response_bytes = Some(1024);
     let err = transport.send(&req).unwrap_err();
@@ -95,4 +105,34 @@ fn response_bodies_are_bounded() {
     let resp = transport.send(&Request::for_url("GET", &url)).unwrap();
     assert_eq!(resp.body, body);
     server.join().unwrap();
+}
+
+#[test]
+fn ca_bundle_must_contain_certificates() {
+    let new = |path: &str| {
+        UreqTransport::new(
+            None,
+            None,
+            &TlsOptions {
+                no_verify: false,
+                ca_bundle: Some(path.into()),
+            },
+        )
+        .err()
+    };
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    assert_eq!(new(&format!("{fixtures}/tls/test-ca.pem")), None);
+    // botocore's message for a missing or unusable bundle.
+    assert_eq!(
+        new("/nonexistent/ca.pem").as_deref(),
+        Some(
+            "Could not find a suitable TLS CA certificate bundle, invalid path: /nonexistent/ca.pem"
+        )
+    );
+    let not_pem = format!("{fixtures}/help/README.md");
+    assert!(
+        new(&not_pem)
+            .unwrap()
+            .starts_with("Could not find a suitable TLS CA certificate bundle")
+    );
 }

@@ -38,6 +38,7 @@ sha2 = "0.10"
 # No `gzip`: like botocore, bodies must be the bytes the service sent so
 # CRC32 / flexible checksums can be checked against them.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 yaml-rust2 = { version = "0.13", default-features = false }
 zstd = { version = "0.13", optional = true }
 
