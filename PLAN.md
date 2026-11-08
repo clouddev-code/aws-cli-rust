@@ -58,7 +58,7 @@ src/
   config.rs          ~/.aws/config, ~/.aws/credentials (INI + ネスト)
   context.rs         外部依存 (Transport, env, 時計, 入力, スリープ, ブラウザ, TTY) の注入口
   client.rs          モデル駆動の API クライアント (driver と認証情報プロバイダが共用)。検証, standard リトライ
-  commands.rs        login, sso login / sso logout
+  commands.rs        login, logout, sso login / sso logout
   s3/                aws s3 高レベルコマンド (mod.rs: cp / ls / mb / mv / presign / rb / rm / sync / website, transfer.rs: 並列転送とマルチパート, filters.rs: --include/--exclude, mime.rs: Content-Type 推測表)
   oauth.rs           PKCE, 認可コードのローカルコールバック受信 (127.0.0.1), JWT クレーム読み取り
   credentials/
@@ -111,7 +111,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/s3_commands.rs` (P4, mv / sync / website 追加分) | sync (アップロード: サイズと時刻の比較, `--delete` とフィルタ, `--size-only` / ダウンロード: ローカルが新しい場合だけ差し替える本家の規則, `--exact-timestamps`, ローカルの `--delete`, ダウンロード後の mtime), mv (ローカル削除, コピー後のコピー元削除, 失敗時は削除しない, 自分自身への mv の拒否), website (PutBucketWebsite) | 計 11 テスト 成功 |
 | `tests/s3_commands.rs` (P4) | リクエスト内容で応答する偽 S3 に対して ls (PRE / サイズ / 集計 / 空のとき 1), mb (LocationConstraint), rb --force, rm (フィルタ / dryrun), cp (アップロード: Content-Type 推測, マルチパート + CRC64NVME, パート失敗で Abort と終了コード 1 / ダウンロード: 再帰, レンジ GET, 親ディレクトリを指すキーの警告と終了コード 2, ディレクトリマーカーの除外 / S3 間コピー / 8 並列), presign (botocore と同じ URL) | 6 テスト 成功 |
 | `tests/completion.rs` (P5) | コマンド, オペレーション, waiter, 引数名 (非表示・使用済みを除く), 値 (選択肢, プロファイル, リージョン, enum) | 2 テスト 成功 |
-| チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 以外), aws-chunked の形式 | 成功 |
+| チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 を含む全アルゴリズム), aws-chunked の形式 | 成功 |
 | event stream 単体テスト | botocore `test_eventstream.py` の正常系・異常系ベクタ (CRC 不一致, 重複ヘッダ, ヘッダ長超過) | 成功 |
 | `oauth::tests::local_callback_server_receives_redirect` | 実際に 127.0.0.1 で待ち受けるコールバックサーバ (ポートを使うため `--ignored`) | サンドボックス外で成功 |
 
@@ -148,7 +148,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - 応答本文の上限: 通常の API 応答 512 MiB、IMDS / コンテナ認証情報 1 MiB。超えたらリトライせずエラー。ストリーミング出力 (`get-object` の outfile, event stream) は上限なしでメモリに読む (Transport のストリーミング化までの制限)。
 - HTTP 本文はメモリに読み切る。`s3api get-object` の `outfile` や event stream は応答全体を受け取ってから処理するため、`logs start-live-tail` のような終わりの無いストリームは扱えない (`start-live-tail` 自体も未実装)。
 - 本家 CLI が削除している event stream 操作 (`lambda invoke-with-response-stream`, `bedrock-runtime converse-stream` など) も表示され、イベントの一覧を JSON で出力する。
-- `--no-verify-ssl`, `--ca-bundle`, `--cli-error-format` は受け付けるが効果がない。
+- `--cli-error-format` は受け付けるが効果がない (エラーは従来形式で表示する)。`--no-verify-ssl` と `--ca-bundle` (`AWS_CA_BUNDLE`, `ca_bundle`) は対応済み。
 - text 出力で `--query` を使う場合、本家はページごとに適用するが、awsr は集約後に 1 回適用する。
 
 ## 6. 開発環境メモ

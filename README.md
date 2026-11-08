@@ -112,6 +112,8 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - `--generate-cli-skeleton` (`input` / `yaml-input` / `output`)
 - 出力: json / text / table / yaml / yaml-stream / off、`--query` (JMESPath)、`--color` (table の色付け)
 - help: 本家の man ページと同じ構成 (説明、構文、オプション、グローバルオプション、例、出力)
+- TLS: `--no-verify-ssl`、`--ca-bundle` / `AWS_CA_BUNDLE` / プロファイルの `ca_bundle`
+- `--help` (どの階層でも `help` と同じページ)、`auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`)
 - 終了コード: 0 / 252 (引数エラー) / 253 (設定エラー) / 254 (サービスエラー) / 255 (その他)
 
 ## ライセンス
