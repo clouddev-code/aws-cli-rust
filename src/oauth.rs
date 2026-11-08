@@ -113,8 +113,14 @@ pub fn query_params(target: &str) -> Vec<(String, String)> {
 }
 
 /// Interpret a callback request target: `Some(Some(..))` for code+state,
-/// `Some(None)` for an error redirect, `None` for anything else.
+/// `Some(None)` for an error redirect, `None` for anything else, including
+/// any path other than the redirect path (awscli does not check the path;
+/// awsr ignores other requests so a stray request cannot end the login).
 pub fn parse_callback(target: &str) -> Option<Option<(String, String)>> {
+    let path = target.split_once('?').map_or(target, |(p, _)| p);
+    if path != CALLBACK_PATH {
+        return None;
+    }
     let params = query_params(target);
     let get = |k: &str| {
         params
@@ -176,14 +182,20 @@ impl CallbackServer for LocalCallbackServer {
                 header.clear();
             }
             let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let Some(result) = parse_callback(&target) else {
+                // Not the redirect (favicon, probes, other paths): keep waiting.
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                continue;
+            };
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{SUCCESS_PAGE}",
                 SUCCESS_PAGE.len()
             );
-            if let Some(result) = parse_callback(&target) {
-                return Ok(result);
-            }
+            return Ok(result);
         }
         Err("Timed out waiting for the authorization redirect from the browser.".into())
     }
@@ -215,6 +227,10 @@ mod tests {
             Some(None)
         );
         assert_eq!(parse_callback("/favicon.ico"), None);
+        // Only the redirect path counts (issue #5).
+        assert_eq!(parse_callback("/other?code=c&state=s"), None);
+        assert_eq!(parse_callback("/x?error=access_denied"), None);
+        assert_eq!(parse_callback("/oauth/callback/x?code=c&state=s"), None);
     }
 
     /// Binds a real loopback port, so it is opt-in (`cargo test -- --ignored`).
@@ -235,11 +251,19 @@ mod tests {
         let client = std::thread::spawn(move || {
             use std::io::Read;
             let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            // A stray request first, then the real redirect.
+            // Stray requests first (one carrying a code on another path),
+            // then the real redirect.
             s.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
                 .unwrap();
             let mut buf = String::new();
             let _ = s.read_to_string(&mut buf);
+            assert!(buf.starts_with("HTTP/1.1 404"), "{buf}");
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(b"GET /evil?code=x&state=y HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+            let mut buf = String::new();
+            let _ = s.read_to_string(&mut buf);
+            assert!(buf.starts_with("HTTP/1.1 404"), "{buf}");
             let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
             s.write_all(b"GET /oauth/callback?code=c1&state=s1 HTTP/1.1\r\nHost: x\r\nUser-Agent: test\r\nAccept: text/html\r\n\r\n")
                 .unwrap();
