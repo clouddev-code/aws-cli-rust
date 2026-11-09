@@ -10,7 +10,7 @@ name: upstream-sync
 
 on:
   schedule:
-    - cron: "0 0 * * 1" # Mondays 09:00 JST
+    - cron: "0 0 * * 2" # Mondays 09:00 JST
   workflow_dispatch:
     inputs:
       tag:
