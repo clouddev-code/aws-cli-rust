@@ -106,7 +106,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/sigv4a_suite.rs` | aws-c-auth の SigV4a テストスイート (botocore が awscrt 経由で使う実装)。導出公開鍵・正規リクエスト・署名対象文字列の一致と ECDSA 署名の検証 | 28 ケース 全件成功 (botocore で到達しない組み合わせ 10 件と期待値の無い 2 件を除外)。S3 フレーバー (正規化なし + X-Amz-Content-SHA256) のケースはスイートに無く、MRAP の SigV4a は S3 SigV4 と共通の経路で担保している |
 | `tests/cli_e2e.rs` (P4 追加分) | 必須チェックサム (CRC64NVME), PutObject の aws-chunked トレーラ, `--checksum-algorithm`, `when_required`, 設定値の検証, GetObject の `outfile` とレスポンス検証, EventBridge グローバルエンドポイントの SigV4a, S3 Select / Lambda / Kinesis の event stream | 計 23 テスト 成功 |
 | `tests/output_formats.rs` (P2) | 本家の TableFormatter / YAMLFormatter / StreamedYAMLFormatter で生成したフィクスチャ (`tests/fixtures/output/`) との一致。YAML 1.2 の引用規則, 80 桁折り返し, 二重引用のエスケープ, 128 バイト超のキー, 表の縦変換, 全角幅 | 59 ケース 全件一致 |
-| `tests/cli_e2e.rs` (P2/P5) | 改名・非表示エイリアス・削除コマンド, 非表示のページングトークン, バリデーション (本家と同文), standard リトライ (503 / スロットリング / 接続エラー / max_attempts / legacy), table / yaml 出力, `--generate-cli-skeleton` (本家 CLI で生成した 33 ケースと一致), `--cli-input-yaml`, waiters (成功 / 失敗状態 / 未対応エラー / 上限回数, メッセージは botocore で確認), help ページ (本家の man 出力と比較) | 計 32 テスト 成功 |
+| `tests/cli_e2e.rs` (P2/P5) | 改名・非表示エイリアス・削除コマンド, 非表示のページングトークン, バリデーション (本家と同文), standard リトライ (503 / スロットリング / 接続エラー / max_attempts / legacy / DynamoDB の既定回数 / 429 / x-amz-retry-after), shorthand の bare value (elb / firehose), table / yaml 出力, `--generate-cli-skeleton` (本家 CLI で生成した 33 ケースと一致), `--cli-input-yaml`, waiters (成功 / 失敗状態 / 未対応エラー / 上限回数, メッセージは botocore で確認), help ページ (本家の man 出力と比較) | 計 34 テスト 成功 |
 | `tests/all_models.rs` (P5) | 埋め込みアーカイブと元のデータディレクトリが全サービス・全ファイルで同じ文書になること | 成功 |
 | `tests/s3_commands.rs` (P4, mv / sync / website 追加分) | sync (アップロード: サイズと時刻の比較, `--delete` とフィルタ, `--size-only` / ダウンロード: ローカルが新しい場合だけ差し替える本家の規則, `--exact-timestamps`, ローカルの `--delete`, ダウンロード後の mtime), mv (ローカル削除, コピー後のコピー元削除, 失敗時は削除しない, 自分自身への mv の拒否), website (PutBucketWebsite) | 計 11 テスト 成功 |
 | `tests/s3_commands.rs` (P4) | リクエスト内容で応答する偽 S3 に対して ls (PRE / サイズ / 集計 / 空のとき 1), mb (LocationConstraint), rb --force, rm (フィルタ / dryrun), cp (アップロード: Content-Type 推測, マルチパート + CRC64NVME, パート失敗で Abort と終了コード 1 / ダウンロード: 再帰, レンジ GET, 親ディレクトリを指すキーの警告と終了コード 2, ディレクトリマーカーの除外 / S3 間コピー / 8 並列), presign (botocore と同じ URL) | 6 テスト 成功 |
@@ -132,7 +132,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。応答本文も、オブジェクトやレンジの期待サイズ + 1 MiB を上限にする。
 - 改名・非表示は `argrename.py`, `removals.py`, `signin.py`, `cloudwatch.py`, `kinesis.py`, ページング (入力トークンの非表示) を反映済み。独自コマンドを作るカスタマイズ (`rds add-option-to-option-group` / `remove-option-from-option-group`, `ses send-email`, `ec2 authorize-security-group-ingress` の簡易引数など) は未実装で、元のオペレーションのまま使う。メンバー名がグローバル引数と同じ場合 (改名表に無いもの) はグローバル側が優先される。
 - S3 Express (CreateSession によるセッション認証) は未対応。
-- リトライ: `standard` は本家 (AWS_NEW_RETRIES_2026 未設定時) と同じ。`adaptive` はクライアント側のレート制限が無く `standard` と同じ動作。`legacy` は本家 v2 と同じくリトライしない。`amz-sdk-request` の `ttl` は送らない。
+- リトライ: `standard` は本家 2.40.0 と同じ (既定の最大試行回数 3、DynamoDB / DynamoDB Streams は 4。非スロットリングの基準遅延 50 ms (DynamoDB 系 25 ms)、`x-amz-retry-after`、モデル外の 429 をスロットリング扱い、ロングポーリング操作のクォータ切れ時の待機)。`adaptive` はクライアント側のレート制限が無く `standard` と同じ動作。`legacy` は本家 v2 と同じくリトライしない。`amz-sdk-request` の `ttl` は送らない。
 - `yaml-stream` でページングした場合、本家はページごとに出力するが、awsr は集約した結果を 1 要素として出力する。
 - `--generate-cli-skeleton output` は本家と違い、生成した応答をモデルで検証しない (本家は検証に失敗して出力できない操作がある)。
 - waiter で `--starting-token` / `--page-size` / `--max-items` を指定しても無視する。
