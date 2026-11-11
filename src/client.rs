@@ -538,24 +538,23 @@ impl<'a> Client<'a> {
                 // quota is used up, rather than failing fast.
                 if acquired || long_polling {
                     let delay = self.retry_delay(attempt, throttling, resp, &service);
-                    if self.config.debug {
-                        let _ = if acquired {
-                            writeln!(
-                                log,
-                                "Retry needed, retrying request after delay of: {delay:?}"
-                            )
-                        } else {
-                            writeln!(
-                                log,
-                                "Retry needed but retry quota reached, not retrying request."
-                            )
-                        };
+                    if self.config.debug && acquired {
+                        let _ = writeln!(
+                            log,
+                            "Retry needed, retrying request after delay of: {delay:?}"
+                        );
                     }
                     (self.ctx.sleep)(delay);
                     if acquired {
                         attempt += 1;
                         continue;
                     }
+                }
+                if self.config.debug {
+                    let _ = writeln!(
+                        log,
+                        "Retry needed but retry quota reached, not retrying request."
+                    );
                 }
             }
             return match outcome {

@@ -105,7 +105,7 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - 引数: スカラー、リスト、JSON、shorthand 構文、`file://` / `fileb://`、`--cli-input-json` / `--cli-input-yaml`、blob の base64 (`--cli-binary-format`)
 - 本家の引数・コマンドの改名と非表示 (`ec2 create-image --reboot`、`sns subscribe --notification-endpoint`、削除されたコマンドなど)
 - 送信前のモデル検証 (本家と同じメッセージ、終了コード 252)
-- リトライ: standard モード (最大 3 回、指数バックオフ + ジッタ、リトライクォータ)。`retry_mode` / `max_attempts` (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`)
+- リトライ: standard モード (最大 3 回、DynamoDB / DynamoDB Streams は 4 回。指数バックオフ + ジッタ、`x-amz-retry-after`、リトライクォータ)。`retry_mode` / `max_attempts` (`AWS_RETRY_MODE` / `AWS_MAX_ATTEMPTS`)
 - 自動ページング、`--max-items` / `--page-size` / `--starting-token`、`--no-paginate`
 - `wait` コマンド (waiters-2.json の全 waiter)
 - `aws s3`: cp / ls / mb / mv / presign / rb / rm / sync / website (`--recursive`、`--include` / `--exclude`、sync の `--delete` / `--size-only` / `--exact-timestamps`、アップロードと mb の `--tags`、マルチパート・並列転送。`[profile] s3 =` の `max_concurrent_requests` / `multipart_threshold` / `multipart_chunksize`)

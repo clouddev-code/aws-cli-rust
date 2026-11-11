@@ -1422,6 +1422,36 @@ fn standard_retries_service_defaults_429_and_retry_after() {
 }
 
 #[test]
+fn long_polling_waits_out_the_delay_when_the_retry_quota_is_used_up() {
+    // 500 tokens at 14 per retry: 35 retries, the 36th failure finds the
+    // quota used up.
+    let mut env = default_env();
+    env.insert("AWS_MAX_ATTEMPTS".into(), "50".into());
+    let Some((r, sleeps)) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(500, ""); 36],
+        env.clone(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.requests.len(), 36);
+    assert_eq!(sleeps.len(), 35);
+    let (r, sleeps) = run_recording_sleeps(
+        &[
+            "sqs",
+            "receive-message",
+            "--queue-url",
+            "https://sqs.us-east-1.amazonaws.com/123456789012/q",
+        ],
+        vec![status(500, ""); 36],
+        env,
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 36);
+    assert_eq!(sleeps.len(), 36);
+}
+
+#[test]
 fn shorthand_bare_values_for_old_list_cases() {
     let Some(r) = run(
         &[
