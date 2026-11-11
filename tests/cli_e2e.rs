@@ -1212,6 +1212,13 @@ fn status(code: u16, body: &str) -> Response {
     }
 }
 
+/// `random.random()` from the fake random source (all bytes 7).
+const FAKE_RAND: f64 = (0x0707_0707_0707_0707u64 >> 11) as f64 / (1u64 << 53) as f64;
+
+fn secs(s: f64) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(s)
+}
+
 /// Run with recorded sleeps.
 fn run_recording_sleeps(
     args: &[&str],
@@ -1252,7 +1259,10 @@ fn standard_retries_transient_and_throttling_errors() {
     };
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     assert_eq!(r.requests.len(), 2);
-    assert_eq!(r.requests[0].header("amz-sdk-request"), Some("attempt=1"));
+    assert_eq!(
+        r.requests[0].header("amz-sdk-request"),
+        Some("attempt=1; max=3")
+    );
     assert_eq!(
         r.requests[1].header("amz-sdk-request"),
         Some("attempt=2; max=3")
@@ -1260,9 +1270,8 @@ fn standard_retries_transient_and_throttling_errors() {
     let id = r.requests[0].header("amz-sdk-invocation-id");
     assert!(id.is_some());
     assert_eq!(r.requests[1].header("amz-sdk-invocation-id"), id);
-    // rand * min(2 ** (attempt - 1), 20) with attempt 1.
-    assert_eq!(sleeps.len(), 1);
-    assert!(sleeps[0] < std::time::Duration::from_secs(1));
+    // rand * min(0.05 * 2 ** (attempt - 1), 20) with attempt 1.
+    assert_eq!(sleeps, [secs(FAKE_RAND * 0.05)]);
 
     // Throttling is retried until max_attempts, then reported.
     let throttled = r#"<ErrorResponse><Error><Code>Throttling</Code><Message>Rate exceeded</Message></Error></ErrorResponse>"#;
@@ -1278,8 +1287,8 @@ fn standard_retries_transient_and_throttling_errors() {
     .unwrap();
     assert_eq!(r.code, 254);
     assert_eq!(r.requests.len(), 3);
-    assert_eq!(sleeps.len(), 2);
-    assert!(sleeps[1] < std::time::Duration::from_secs(2));
+    // Throttling backs off from 1 second.
+    assert_eq!(sleeps, [secs(FAKE_RAND), secs(FAKE_RAND * 2.0)]);
     assert!(r.stderr.contains("(Throttling)"), "{}", r.stderr);
 
     // Non-retryable errors are not retried.
@@ -1312,6 +1321,7 @@ fn standard_retries_transient_and_throttling_errors() {
     )
     .unwrap();
     assert_eq!(r.requests.len(), 1);
+    assert_eq!(r.requests[0].header("amz-sdk-request"), Some("attempt=1"));
     let mut env = default_env();
     env.insert("AWS_RETRY_MODE".into(), "bogus".into());
     let (r, _) = run_recording_sleeps(&["sts", "get-caller-identity"], vec![], env).unwrap();
@@ -1324,6 +1334,91 @@ fn standard_retries_transient_and_throttling_errors() {
     assert_eq!(r.requests.len(), 3);
     assert_eq!(sleeps.len(), 2);
     assert_eq!(r.code, 255);
+}
+
+#[test]
+fn standard_retries_service_defaults_429_and_retry_after() {
+    // DynamoDB defaults to 4 attempts and a 25 ms base for non-throttling
+    // errors.
+    let Some((r, sleeps)) = run_recording_sleeps(
+        &["dynamodb", "list-tables"],
+        vec![status(500, ""); 4],
+        default_env(),
+    ) else {
+        return;
+    };
+    assert_eq!(r.requests.len(), 4);
+    assert_eq!(
+        r.requests[0].header("amz-sdk-request"),
+        Some("attempt=1; max=4")
+    );
+    assert_eq!(
+        sleeps,
+        [
+            secs(FAKE_RAND * 0.025),
+            secs(FAKE_RAND * 0.05),
+            secs(FAKE_RAND * 0.1)
+        ]
+    );
+    // An explicit max_attempts wins over the service default.
+    let mut env = default_env();
+    env.insert("AWS_MAX_ATTEMPTS".into(), "2".into());
+    let (r, _) =
+        run_recording_sleeps(&["dynamodb", "list-tables"], vec![status(500, ""); 2], env).unwrap();
+    assert_eq!(r.requests.len(), 2);
+    assert_eq!(
+        r.requests[1].header("amz-sdk-request"),
+        Some("attempt=2; max=2")
+    );
+
+    // A 429 with an empty body is a throttling error.
+    let identity = r#"<GetCallerIdentityResponse><GetCallerIdentityResult><Account>1</Account></GetCallerIdentityResult></GetCallerIdentityResponse>"#;
+    let (r, sleeps) = run_recording_sleeps(
+        &["sts", "get-caller-identity"],
+        vec![status(429, ""), ok(identity)],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    assert_eq!(sleeps, [secs(FAKE_RAND)]);
+
+    // ... unless its code is a modeled error, which the model decides.
+    let malformed = r#"<ErrorResponse><Error><Code>MalformedPolicyDocument</Code><Message>bad</Message></Error></ErrorResponse>"#;
+    let (r, _) = run_recording_sleeps(
+        &[
+            "sts",
+            "assume-role",
+            "--role-arn",
+            "arn:aws:iam::123456789012:role/r",
+            "--role-session-name",
+            "session",
+        ],
+        vec![status(429, malformed)],
+        default_env(),
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 1, "stderr: {}", r.stderr);
+    assert!(r.stderr.contains("MalformedPolicyDocument"), "{}", r.stderr);
+
+    // x-amz-retry-after (milliseconds) raises the delay, by at most 5
+    // seconds over the computed one; invalid values are ignored.
+    for (value, expected) in [
+        ("1500", secs(1.5)),
+        ("60000", secs(FAKE_RAND * 0.05 + 5.0)),
+        ("-1", secs(FAKE_RAND * 0.05)),
+        ("soon", secs(FAKE_RAND * 0.05)),
+    ] {
+        let mut unavailable = status(503, "");
+        unavailable.headers = vec![("x-amz-retry-after".into(), value.into())];
+        let (r, sleeps) = run_recording_sleeps(
+            &["sts", "get-caller-identity"],
+            vec![unavailable, ok(identity)],
+            default_env(),
+        )
+        .unwrap();
+        assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+        assert_eq!(sleeps, [expected], "x-amz-retry-after: {value}");
+    }
 }
 
 #[test]

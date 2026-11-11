@@ -142,13 +142,6 @@ impl TransportError {
     pub fn is_body_limit(&self) -> bool {
         self.0.starts_with(BODY_LIMIT_MESSAGE)
     }
-
-    /// Connect / read timeouts cost more retry quota
-    /// (`ConnectTimeoutError`, `ReadTimeoutError`).
-    pub fn is_timeout(&self) -> bool {
-        let m = self.0.to_ascii_lowercase();
-        m.contains("timeout") || m.contains("timed out")
-    }
 }
 
 impl std::fmt::Display for TransportError {
