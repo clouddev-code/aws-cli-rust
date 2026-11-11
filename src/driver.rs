@@ -356,6 +356,7 @@ fn run_inner(
         let pctx = ParamContext {
             cli_name: &def.cli_name,
             binary_format,
+            operation: Some((command, &cli_op)),
         };
         match (&def.target, value) {
             (ArgTarget::Member(name), ArgValue::Bool(b)) => {
@@ -613,6 +614,7 @@ fn merge_cli_input(
     let pctx = ParamContext {
         cli_name: flag,
         binary_format,
+        operation: None,
     };
     let text =
         match params::load_paramfile(raw, &pctx).map_err(|e| Failure::usage(e.to_string()))? {

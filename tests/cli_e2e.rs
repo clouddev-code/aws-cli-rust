@@ -1422,6 +1422,51 @@ fn standard_retries_service_defaults_429_and_retry_after() {
 }
 
 #[test]
+fn shorthand_bare_values_for_old_list_cases() {
+    let Some(r) = run(
+        &[
+            "elb",
+            "describe-instance-health",
+            "--load-balancer-name",
+            "lb",
+            "--instances",
+            "i-1",
+            "i-2",
+        ],
+        vec![ok("<DescribeInstanceHealthResponse/>")],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let sent = body(&r.requests[0]);
+    assert!(
+        sent.contains("Instances.member.1.InstanceId=i-1&Instances.member.2.InstanceId=i-2"),
+        "{sent}"
+    );
+
+    // A single member takes every value, even one containing "=" (base64).
+    let r = run(
+        &[
+            "firehose",
+            "put-record-batch",
+            "--delivery-stream-name",
+            "s",
+            "--records",
+            "aGk=",
+            "eW8=",
+        ],
+        vec![ok(r#"{"FailedPutCount":0,"RequestResponses":[]}"#)],
+    )
+    .unwrap();
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let sent: serde_json::Value = serde_json::from_str(&body(&r.requests[0])).unwrap();
+    assert_eq!(
+        sent["Records"],
+        serde_json::json!([{"Data": "aGk="}, {"Data": "eW8="}])
+    );
+}
+
+#[test]
 fn table_and_yaml_output() {
     let xml = r#"<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::1:user/a</Arn><UserId>AIDA</UserId><Account>123456789012</Account></GetCallerIdentityResult></GetCallerIdentityResponse>"#;
     let Some(r) = run(
