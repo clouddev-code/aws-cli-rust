@@ -909,6 +909,7 @@ impl S3<'_, '_> {
             let pctx = crate::cli::params::ParamContext {
                 cli_name: "--metadata",
                 binary_format: crate::cli::params::BinaryFormat::Base64,
+                operation: None,
             };
             let v = crate::cli::params::unpack(&shape, std::slice::from_ref(raw), &pctx)
                 .map_err(|e| Failure::usage(e.to_string()))?;

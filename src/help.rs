@@ -1033,40 +1033,15 @@ fn supports_shorthand(shape: &Shape) -> bool {
 /// `ParamShorthandDocGen.generate_shorthand_example`: `None` means "do not
 /// document"; an empty string means "too complex".
 fn shorthand_example(def: &ArgDef, shape: &Shape, page: &OperationPage) -> Option<String> {
-    let old_list_case = matches!(
-        (page.op.model.service_name.as_str(), page.name, def.name()),
-        ("firehose", "put-record-batch", "records")
-            | (
-                "workspaces",
-                "reboot-workspaces",
-                "reboot-workspace-requests"
-            )
-            | (
-                "workspaces",
-                "rebuild-workspaces",
-                "rebuild-workspace-requests"
-            )
-            | (
-                "workspaces",
-                "terminate-workspaces",
-                "terminate-workspace-requests"
-            )
-            | ("elb", "remove-tags", "tags")
-            | ("elb", "describe-instance-health", "instances")
-            | (
-                "elb",
-                "deregister-instances-from-load-balancer",
-                "instances"
-            )
-            | ("elb", "register-instances-with-load-balancer", "instances")
-    );
-    if shape.type_name() == "list"
-        && let Some(m) = shape.member()
-        && m.type_name() == "structure"
-        && m.members().len() == 1
-        && old_list_case
+    // The deprecated syntax is documented only for a single member; with
+    // more, the regular shorthand documents all of them.
+    if let Some(member_name) = crate::cli::params::old_list_case_key(
+        &page.op.model.service_name,
+        page.name,
+        def.name(),
+        shape,
+    ) && shape.member().is_some_and(|m| m.members().len() == 1)
     {
-        let member_name = m.members()[0].0;
         if shape.get("min").and_then(J::as_i64) == Some(1)
             && shape.get("max").and_then(J::as_i64) == Some(1)
         {

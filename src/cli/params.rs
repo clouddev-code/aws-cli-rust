@@ -35,6 +35,9 @@ pub enum BinaryFormat {
 pub struct ParamContext<'a> {
     pub cli_name: &'a str,
     pub binary_format: BinaryFormat,
+    /// (command, operation) the argument belongs to, e.g. `("elb",
+    /// "remove-tags")`.
+    pub operation: Option<(&'a str, &'a str)>,
 }
 
 impl ParamContext<'_> {
@@ -119,6 +122,19 @@ pub fn unpack(shape: &Shape, values: &[String], ctx: &ParamContext) -> Result<Va
     // process-cli-arg: shorthand for complex shapes unless it looks like JSON.
     let looks_json = first.trim_start().starts_with('[') || first.trim_start().starts_with('{');
     if is_complex(shape) && !looks_json {
+        let old_list_key = ctx.operation.and_then(|(command, operation)| {
+            old_list_case_key(
+                command,
+                operation,
+                ctx.cli_name.trim_start_matches("--"),
+                shape,
+            )
+        });
+        if let Some(key) = old_list_key {
+            let mut parsed = parse_old_list_case(shape, &owned, key, ctx)?;
+            decode_blobs(&mut parsed, shape, ctx)?;
+            return Ok(parsed);
+        }
         if let Some(v) = special_cases(shape, &first) {
             return Ok(v);
         }
@@ -140,6 +156,113 @@ pub fn unpack(shape: &Shape, values: &[String], ctx: &ParamContext) -> Result<Va
     let mut v = unpack_cli_arg(shape, &owned, ctx)?;
     decode_blobs(&mut v, shape, ctx)?;
     Ok(v)
+}
+
+/// `ParamShorthand._OLD_LIST_CASES`: list-of-structure arguments that take
+/// bare values (`--instances id-1 id-2`), as (command, operation, argument,
+/// member each bare value is assigned to). The member is pinned so that the
+/// syntax keeps working if the service adds members to the structure.
+const OLD_LIST_CASES: &[(&str, &str, &str, &str)] = &[
+    ("firehose", "put-record-batch", "records", "Data"),
+    (
+        "workspaces",
+        "reboot-workspaces",
+        "reboot-workspace-requests",
+        "WorkspaceId",
+    ),
+    (
+        "workspaces",
+        "rebuild-workspaces",
+        "rebuild-workspace-requests",
+        "WorkspaceId",
+    ),
+    (
+        "workspaces",
+        "terminate-workspaces",
+        "terminate-workspace-requests",
+        "WorkspaceId",
+    ),
+    ("elb", "remove-tags", "tags", "Key"),
+    ("elb", "describe-instance-health", "instances", "InstanceId"),
+    (
+        "elb",
+        "deregister-instances-from-load-balancer",
+        "instances",
+        "InstanceId",
+    ),
+    (
+        "elb",
+        "register-instances-with-load-balancer",
+        "instances",
+        "InstanceId",
+    ),
+];
+
+/// `_get_old_list_case_key`: the member bare values of `argument` are
+/// assigned to, if it takes them.
+pub fn old_list_case_key<'s>(
+    command: &str,
+    operation: &str,
+    argument: &str,
+    shape: &Shape<'s>,
+) -> Option<&'s str> {
+    let member = shape.member().filter(|_| shape.type_name() == "list")?;
+    if member.type_name() != "structure" {
+        return None;
+    }
+    let (_, _, _, pinned) = OLD_LIST_CASES
+        .iter()
+        .find(|(c, o, a, _)| (*c, *o, *a) == (command, operation, argument))?;
+    let members = member.members();
+    match members.as_slice() {
+        [(only, _)] => Some(*only),
+        _ => members
+            .iter()
+            .map(|(name, _)| *name)
+            .find(|name| name == pinned),
+    }
+}
+
+/// `_parse_old_list_case`: with a single member every value is assigned to
+/// it, even one containing `=` (base64). Otherwise values that start with a
+/// member name and `=` are regular shorthand, and any other value is a bare
+/// value for `key`.
+fn parse_old_list_case(
+    shape: &Shape,
+    values: &[String],
+    key: &str,
+    ctx: &ParamContext,
+) -> Result<Value, ParamError> {
+    let bare = |v: &str| {
+        let mut m = crate::value::Map::new();
+        m.insert(key.into(), Value::Str(v.into()));
+        Value::Map(m)
+    };
+    let members = shape.member().map(|m| m.members()).unwrap_or_default();
+    if members.len() == 1 {
+        return Ok(Value::List(values.iter().map(|v| bare(v)).collect()));
+    }
+    let key_value = |v: &str| {
+        let v = v.trim_start();
+        members.iter().any(|(name, _)| {
+            v.strip_prefix(name)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+    };
+    let mut parsed = Value::List(
+        values
+            .iter()
+            .map(|v| {
+                if key_value(v) {
+                    shorthand::parse(v).map_err(|e| ctx.err(e.0))
+                } else {
+                    Ok(bare(v))
+                }
+            })
+            .collect::<Result<_, _>>()?,
+    );
+    shorthand::back_compat(&mut parsed, shape).map_err(|e| ctx.err(e.0))?;
+    Ok(parsed)
 }
 
 /// `{"Value": x}` structures accept a bare value.
@@ -265,4 +388,63 @@ fn decode_blobs(v: &mut Value, shape: &Shape, ctx: &ParamContext) -> Result<(), 
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ServiceModel;
+
+    /// `elb remove-tags --tags` after the service adds `Value` to `TagKeyOnly`.
+    fn model() -> ServiceModel {
+        ServiceModel::from_json(
+            "elb",
+            serde_json::json!({
+                "metadata": {},
+                "operations": {},
+                "shapes": {
+                    "TagKeyList": {"type": "list", "member": {"shape": "TagKeyOnly"}},
+                    "TagKeyOnly": {
+                        "type": "structure",
+                        "members": {
+                            "Key": {"shape": "String"},
+                            "Value": {"shape": "String"}
+                        }
+                    },
+                    "String": {"type": "string"}
+                }
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn old_list_case_keeps_bare_values_when_members_are_added() {
+        let model = model();
+        let shape = model.shape("TagKeyList").unwrap();
+        assert_eq!(
+            old_list_case_key("elb", "remove-tags", "tags", &shape),
+            Some("Key")
+        );
+        assert_eq!(old_list_case_key("elb", "add-tags", "tags", &shape), None);
+        let ctx = ParamContext {
+            cli_name: "--tags",
+            binary_format: BinaryFormat::Base64,
+            operation: Some(("elb", "remove-tags")),
+        };
+        let values: Vec<String> = ["k1", "Value = v, Key=k2", "a=b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let parsed = unpack(&shape, &values, &ctx).unwrap();
+        let expected = serde_json::json!([
+            {"Key": "k1"},
+            {"Value": "v", "Key": "k2"},
+            {"Key": "a=b"}
+        ]);
+        assert_eq!(
+            parsed.to_json(crate::value::TimestampStyle::Iso8601),
+            expected
+        );
+    }
 }

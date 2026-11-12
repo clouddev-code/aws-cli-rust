@@ -6,7 +6,7 @@ use crate::checksum;
 use crate::context::Context;
 use crate::endpoint::RuleSet;
 use crate::http::Request;
-use crate::model::{Operation, ServiceModel};
+use crate::model::{Operation, ServiceModel, Shape};
 use crate::output;
 use crate::protocol::parse::{self as rparse, ParseError, ServiceError};
 use crate::protocol::ser;
@@ -87,20 +87,12 @@ pub enum RetryMode {
     Adaptive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RetryConfig {
     pub mode: RetryMode,
-    /// Total attempts including the first (`max_attempts`).
-    pub max_attempts: u32,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        RetryConfig {
-            mode: RetryMode::Standard,
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-        }
-    }
+    /// Total attempts including the first (`max_attempts`); `None` uses the
+    /// service default.
+    pub max_attempts: Option<u32>,
 }
 
 impl RetryConfig {
@@ -118,9 +110,9 @@ impl RetryConfig {
             }
         };
         let max_attempts = match max_attempts {
-            None => DEFAULT_MAX_ATTEMPTS,
+            None => None,
             Some(v) => match v.trim().parse::<u32>() {
-                Ok(n) if n >= 1 => n,
+                Ok(n) if n >= 1 => Some(n),
                 _ => {
                     return Err(format!(
                         "Value provided to \"max_attempts\": {v} must be an integer greater than or equal to 1"
@@ -132,12 +124,27 @@ impl RetryConfig {
     }
 }
 
-/// Retry settings that are not configurable (`retries/standard.py` with
-/// `AWS_NEW_RETRIES_2026` unset, as in the CLI).
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+/// Retry settings that are not configurable (`retries/standard.py`).
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+/// `_SERVICE_MAX_ATTEMPTS`, keyed by hyphenized service id.
+const SERVICE_MAX_ATTEMPTS: &[(&str, u32)] = &[("dynamodb", 4), ("dynamodb-streams", 4)];
 const MAX_BACKOFF_SECS: f64 = 20.0;
-const RETRY_COST: u32 = 5;
-const TIMEOUT_RETRY_COST: u32 = 10;
+const THROTTLING_BASE_SCALE: f64 = 1.0;
+const NON_THROTTLING_BASE_SCALE: f64 = 0.05;
+/// `_SERVICE_BACKOFF_CONFIG`
+const SERVICE_NON_THROTTLING_BASE_SCALE: &[(&str, f64)] =
+    &[("dynamodb", 0.025), ("dynamodb-streams", 0.025)];
+const RETRY_AFTER_HEADER: &str = "x-amz-retry-after";
+const RETRY_AFTER_MAX_ADDITIONAL_SECS: f64 = 5.0;
+/// `RetryHandler._LONG_POLLING_OPERATIONS`
+const LONG_POLLING_OPERATIONS: &[(&str, &str)] = &[
+    ("sqs", "ReceiveMessage"),
+    ("sfn", "GetActivityTask"),
+    ("swf", "PollForActivityTask"),
+    ("swf", "PollForDecisionTask"),
+];
+const RETRY_COST: u32 = 14;
+const THROTTLING_RETRY_COST: u32 = 5;
 const NO_RETRY_INCREMENT: u32 = 1;
 const INITIAL_RETRY_TOKENS: u32 = 500;
 
@@ -164,33 +171,61 @@ const THROTTLED_ERROR_CODES: &[&str] = &[
     "EC2ThrottledException",
 ];
 
+/// `ModeledRetryErrorDetector`: the operation's modeled error that `code`
+/// names, by shape name or modeled error code.
+fn modeled_error<'m>(op: &Operation<'m>, code: &str) -> Option<Shape<'m>> {
+    op.get("errors")
+        .and_then(J::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| op.model.resolve_ref(r).ok())
+        .find(|shape| {
+            shape
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(J::as_str)
+                .unwrap_or(&shape.name)
+                == code
+        })
+}
+
+/// `ModeledRetryErrorDetector.detect_error_type`: `Some(throttling)` when
+/// `code` is a modeled error marked `retryable`.
+fn modeled_retry(op: &Operation, code: &str) -> Option<bool> {
+    let retryable = modeled_error(op, code)?.get("retryable")?;
+    Some(retryable.get("throttling").and_then(J::as_bool) == Some(true))
+}
+
+/// `ThrottlingStatusCodeChecker`: a 429 whose error code matches none of the
+/// operation's modeled errors (the model decides for those).
+fn throttling_status(op: &Operation, resp: &crate::http::Response, code: Option<&str>) -> bool {
+    resp.status == 429 && code.is_none_or(|c| modeled_error(op, c).is_none())
+}
+
+/// `ThrottlingErrorDetector.is_throttling_error_from_context`.
+fn is_throttling(op: &Operation, resp: &crate::http::Response, code: Option<&str>) -> bool {
+    if code.is_some_and(|c| THROTTLED_ERROR_CODES.contains(&c)) {
+        return true;
+    }
+    if let Some(throttling) = code.and_then(|c| modeled_retry(op, c)) {
+        return throttling;
+    }
+    throttling_status(op, resp, code)
+}
+
 /// `StandardRetryConditions` minus the attempt limit: transient errors,
-/// throttling, errors modeled as `retryable`, and the special cases (STS
-/// `IDPCommunicationError`, DynamoDB CRC32 mismatches).
+/// throttling (by code or an unmodeled 429), errors modeled as `retryable`,
+/// and the special cases (STS `IDPCommunicationError`, DynamoDB CRC32
+/// mismatches).
 fn retryable(op: &Operation, resp: &crate::http::Response, code: Option<&str>) -> bool {
-    if TRANSIENT_STATUS_CODES.contains(&resp.status) {
+    if TRANSIENT_STATUS_CODES.contains(&resp.status) || throttling_status(op, resp, code) {
         return true;
     }
     if let Some(code) = code {
-        if TRANSIENT_ERROR_CODES.contains(&code) || THROTTLED_ERROR_CODES.contains(&code) {
-            return true;
-        }
-        let modeled = op
-            .get("errors")
-            .and_then(J::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|r| op.model.resolve_ref(r).ok())
-            .any(|shape| {
-                shape.get("retryable").is_some()
-                    && shape
-                        .get("error")
-                        .and_then(|e| e.get("code"))
-                        .and_then(J::as_str)
-                        .unwrap_or(&shape.name)
-                        == code
-            });
-        if modeled {
+        if TRANSIENT_ERROR_CODES.contains(&code)
+            || THROTTLED_ERROR_CODES.contains(&code)
+            || modeled_retry(op, code).is_some()
+        {
             return true;
         }
         if op.model.service_name == "sts" && code == "IDPCommunicationError" {
@@ -389,16 +424,24 @@ impl<'a> Client<'a> {
 
         let invocation_id = (self.ctx.uuid)();
         let retry = &self.config.retry;
+        let service = self.model.service_id().replace(' ', "-").to_lowercase();
+        let max_attempts = retry.max_attempts.unwrap_or_else(|| {
+            SERVICE_MAX_ATTEMPTS
+                .iter()
+                .find(|(s, _)| *s == service)
+                .map_or(DEFAULT_MAX_ATTEMPTS, |(_, n)| *n)
+        });
+        let long_polling = LONG_POLLING_OPERATIONS.contains(&(service.as_str(), op_name));
         let mut attempt = 1u32;
         loop {
             let mut req = base.clone();
-            // `add_retry_headers`; `max` is known once the first attempt has
-            // been checked for a retry.
+            // `add_retry_headers`; `MaxAttemptsSeeder` adds `max` from the
+            // first attempt, but only with a retry handler (not `legacy`).
             req.set_header("amz-sdk-invocation-id", invocation_id.clone());
-            let sdk_request = if attempt > 1 {
-                format!("attempt={attempt}; max={}", retry.max_attempts)
-            } else {
+            let sdk_request = if retry.mode == RetryMode::Legacy {
                 format!("attempt={attempt}")
+            } else {
+                format!("attempt={attempt}; max={max_attempts}")
             };
             req.set_header("amz-sdk-request", sdk_request);
             let payload = request_checksum
@@ -457,46 +500,62 @@ impl<'a> Client<'a> {
                     if e.is_body_limit() {
                         return (
                             ClientError::Transport(format!("{e}: \"{}\"", req.url())),
-                            None,
+                            false,
                         );
                     }
-                    let timeout = e.is_timeout();
                     (
                         ClientError::Transport(format!(
                             "Could not connect to the endpoint URL: \"{}\": {e}",
                             req.url()
                         )),
-                        Some(timeout),
+                        true,
                     )
                 })
                 .map(|resp| {
                     let parsed = self.parse_response(&op, params, &resp);
                     (resp, parsed)
                 });
-            let delay = match &outcome {
-                _ if retry.mode == RetryMode::Legacy || attempt >= retry.max_attempts => None,
-                Err((_, None)) => None,
-                Err((_, Some(timeout))) => self.retry_delay(attempt, *timeout),
+            // (throttling, response) of a failure to retry.
+            let needs_retry = match &outcome {
+                _ if retry.mode == RetryMode::Legacy || attempt >= max_attempts => None,
+                Err((_, retryable)) => retryable.then_some((false, None)),
                 Ok((resp, parsed)) => {
                     let code = match parsed {
                         Err(ClientError::Service(e)) => Some(e.code.as_str()),
                         _ => None,
                     };
-                    retryable(&op, resp, code)
-                        .then(|| self.retry_delay(attempt, false))
-                        .flatten()
+                    retryable(&op, resp, code).then(|| (is_throttling(&op, resp, code), Some(resp)))
                 }
             };
-            if let Some(delay) = delay {
+            if let Some((throttling, resp)) = needs_retry {
+                let cost = if throttling {
+                    THROTTLING_RETRY_COST
+                } else {
+                    RETRY_COST
+                };
+                let acquired = self.quota.acquire(cost);
+                // Long-polling operations still wait out the delay when the
+                // quota is used up, rather than failing fast.
+                if acquired || long_polling {
+                    let delay = self.retry_delay(attempt, throttling, resp, &service);
+                    if self.config.debug && acquired {
+                        let _ = writeln!(
+                            log,
+                            "Retry needed, retrying request after delay of: {delay:?}"
+                        );
+                    }
+                    (self.ctx.sleep)(delay);
+                    if acquired {
+                        attempt += 1;
+                        continue;
+                    }
+                }
                 if self.config.debug {
                     let _ = writeln!(
                         log,
-                        "Retry needed, retrying request after delay of: {delay:?}"
+                        "Retry needed but retry quota reached, not retrying request."
                     );
                 }
-                (self.ctx.sleep)(delay);
-                attempt += 1;
-                continue;
             }
             return match outcome {
                 Err((e, _)) => Err(e),
@@ -529,24 +588,40 @@ impl<'a> Client<'a> {
         })
     }
 
-    /// `RetryQuotaChecker.acquire_retry_quota` + `ExponentialBackoff`: the
-    /// delay before the next attempt, or `None` when the quota is used up.
-    fn retry_delay(&self, attempt: u32, timeout: bool) -> Option<std::time::Duration> {
-        let cost = if timeout {
-            TIMEOUT_RETRY_COST
-        } else {
-            RETRY_COST
-        };
-        if !self.quota.acquire(cost) {
-            return None;
-        }
+    /// `ExponentialBackoff.delay_amount`: `rand * min(base_scale *
+    /// 2 ** (attempt - 1), 20)`, raised to `x-amz-retry-after` (at most 5
+    /// seconds more).
+    fn retry_delay(
+        &self,
+        attempt: u32,
+        throttling: bool,
+        resp: Option<&crate::http::Response>,
+        service: &str,
+    ) -> std::time::Duration {
         let bytes = (self.ctx.random)(8);
         let mut buf = [0u8; 8];
         buf[..bytes.len().min(8)].copy_from_slice(&bytes[..bytes.len().min(8)]);
         // 53 random bits, like Python's `random.random()`.
         let rand = (u64::from_le_bytes(buf) >> 11) as f64 / (1u64 << 53) as f64;
-        let base = 2f64.powi(attempt as i32 - 1).min(MAX_BACKOFF_SECS);
-        Some(std::time::Duration::from_secs_f64(rand * base))
+        let base_scale = if throttling {
+            THROTTLING_BASE_SCALE
+        } else {
+            SERVICE_NON_THROTTLING_BASE_SCALE
+                .iter()
+                .find(|(s, _)| *s == service)
+                .map_or(NON_THROTTLING_BASE_SCALE, |(_, scale)| *scale)
+        };
+        let t = rand * (base_scale * 2f64.powi(attempt as i32 - 1)).min(MAX_BACKOFF_SECS);
+        let retry_after = resp
+            .and_then(|r| r.header(RETRY_AFTER_HEADER))
+            .and_then(|v| v.trim().parse::<i128>().ok())
+            .filter(|ms| *ms >= 0)
+            .map(|ms| ms as f64 / 1000.0);
+        let secs = match retry_after {
+            Some(ra) => t.max(ra.min(t + RETRY_AFTER_MAX_ADDITIONAL_SECS)),
+            None => t,
+        };
+        std::time::Duration::from_secs_f64(secs)
     }
 
     /// A presigned URL for an operation (`generate_presigned_url`): SigV4
