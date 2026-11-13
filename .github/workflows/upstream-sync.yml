@@ -4,6 +4,10 @@
 # opens a pull request with a summary of the model changes and the upstream
 # CHANGELOG. A failing test run opens a draft pull request with the log.
 #
+# The build job runs code fetched from aws-cli and PyPI, so it only gets a
+# read-only token that is not left in the checkout. It hands its changes to
+# the publish job as a patch; only publish can push and open the pull request.
+#
 # Requires "Allow GitHub Actions to create and approve pull requests"
 # (Settings > Actions > General). Pull requests opened with GITHUB_TOKEN do
 # not trigger other workflows, so oss-scan does not run on them by itself.
@@ -18,23 +22,31 @@ on:
         description: "aws-cli release tag (default: the latest 2.x.y)"
         required: false
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: upstream-sync
 
 jobs:
-  sync:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      branch: ${{ steps.target.outputs.branch }}
+      skip: ${{ steps.target.outputs.skip }}
+      status: ${{ steps.test.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Decide the target release
         id: target
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           current=$(sed -n 's/^tag *= *//p' upstream.lock)
@@ -48,7 +60,7 @@ jobs:
           if [ "$tag" = "$current" ]; then
             echo "Already at aws-cli $tag."
             skip=true
-          elif git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" > /dev/null 2>&1; then
             echo "Branch $branch already exists; not opening another pull request."
             skip=true
           fi
@@ -78,6 +90,8 @@ jobs:
             .cargo-home/registry
             .cargo-home/git
             target
+            !target/awscli-venv
+            !target/sync
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -94,18 +108,50 @@ jobs:
           echo "status=$?" >> "$GITHUB_OUTPUT"
           tail -n 40 target/test.log
 
-      - name: Open a pull request
+      - name: Collect the changes
         if: steps.target.outputs.skip == 'false'
+        run: |
+          mkdir -p target/sync
+          # --cached also covers new files (e.g. a new service's endpoint tests).
+          git add -A upstream.lock assets/cli.json tests/fixtures
+          git diff --cached --binary > target/sync/changes.patch
+          cp target/upstream-summary.md target/test.log target/sync/
+
+      - uses: actions/upload-artifact@v4
+        if: steps.target.outputs.skip == 'false'
+        with:
+          name: upstream-sync
+          path: target/sync
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: needs.build.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: upstream-sync
+          path: ${{ runner.temp }}/sync
+
+      - name: Open a pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.target.outputs.tag }}
-          BRANCH: ${{ steps.target.outputs.branch }}
-          STATUS: ${{ steps.test.outputs.status }}
+          TAG: ${{ needs.build.outputs.tag }}
+          BRANCH: ${{ needs.build.outputs.branch }}
+          STATUS: ${{ needs.build.outputs.status }}
+          SYNC: ${{ runner.temp }}/sync
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add upstream.lock assets/cli.json tests/fixtures
+          git apply --index "$SYNC/changes.patch"
           git commit -m "Update aws-cli to $TAG"
           git push origin "$BRANCH"
           {
@@ -114,7 +160,7 @@ jobs:
               echo "> \`make test\` failed with this release. See the log at the end."
               echo
             fi
-            cat target/upstream-summary.md
+            cat "$SYNC/upstream-summary.md"
             echo
             echo "Models, paginators, waiters and examples are embedded at build time,"
             echo "so this pull request only moves \`upstream.lock\` (and \`assets/cli.json\`,"
@@ -126,20 +172,20 @@ jobs:
               echo "### Test log (last 80 lines)"
               echo
               echo '```'
-              tail -n 80 target/test.log | sed 's/```/` ` `/g'
+              tail -n 80 "$SYNC/test.log" | sed 's/```/` ` `/g'
               echo '```'
             fi
-          } > target/pr-body.md
+          } > "$RUNNER_TEMP/pr-body.md"
           # GitHub limits a pull request body to 65,536 characters.
-          head -c 60000 target/pr-body.md > target/pr-body-trimmed.md
+          head -c 60000 "$RUNNER_TEMP/pr-body.md" > "$RUNNER_TEMP/pr-body-trimmed.md"
           draft=()
           if [ "$STATUS" != "0" ]; then
             draft=(--draft)
           fi
           gh pr create --base main --head "$BRANCH" \
             --title "Update aws-cli to $TAG" \
-            --body-file target/pr-body-trimmed.md "${draft[@]}"
+            --body-file "$RUNNER_TEMP/pr-body-trimmed.md" "${draft[@]}"
 
       - name: Fail when the tests failed
-        if: steps.target.outputs.skip == 'false' && steps.test.outputs.status != '0'
+        if: needs.build.outputs.status != '0'
         run: exit 1

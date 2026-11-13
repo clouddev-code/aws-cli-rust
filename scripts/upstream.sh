@@ -97,11 +97,14 @@ fixtures)
         rsync -a --delete "$REF/tests/unit/botocore/protocols/$dir/" "$FIXTURES/protocols/$dir/"
     done
     cp "$REF/tests/unit/botocore/protocols/protocol-tests-ignore-list.json" "$FIXTURES/protocols/"
-    # Output of the reference CLI.
+    # Output of the reference CLI. Only its hash-locked dependencies are
+    # installed; awscli itself runs from the checkout, so nothing of it
+    # (such as its build backend) runs at install time.
     mkdir -p target
-    uv venv --quiet --allow-existing -p 3.12 "$VENV"
-    VIRTUAL_ENV=$VENV uv pip install --quiet -e "$REF"
-    export AWS_DEFAULT_REGION=us-east-1
+    uv venv --quiet --clear -p 3.12 "$VENV"
+    VIRTUAL_ENV=$VENV uv pip install --quiet --require-hashes \
+        -r "$REF/requirements/download-deps/system-sandbox-lock.txt"
+    export AWS_DEFAULT_REGION=us-east-1 PYTHONPATH=$REF
     "$VENV/bin/python" "$FIXTURES/skeleton/generate.py" > "$FIXTURES/skeleton/cases.json"
     "$VENV/bin/python" "$FIXTURES/output/generate.py" > "$FIXTURES/output/cases.json"
     "$VENV/bin/python" "$FIXTURES/help/generate.py" "$FIXTURES/help"
