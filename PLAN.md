@@ -157,16 +157,9 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - 依存 crate の一部 (ureq-proto) が `.vscode/settings.json` を含むため、初回の `cargo fetch` はサンドボックス外で実行した。
 - モデルは build.rs がビルド時に埋め込む (各サービスの最新 API バージョンだけ, sdk-extras をマージして minify, ファイル単位の zstd フレーム)。110 MB の JSON が約 14 MB になり、バイナリは約 21 MB。圧縮はビルド 1 回あたり (プロファイルごと) 約 40 秒。`AWSR_EMBED_LEVEL` で zstd レベル (既定 19)、`AWSR_EMBED_DATA_DIR` で元データを指定できる。`--no-default-features` で埋め込みなし。
 - 実行時の探索順: `AWSR_DATA_DIR` → 埋め込み → 実行ファイル横の `data/` → `reference/aws-cli/awscli/botocore/data`。
-- 本家との突き合わせ用フィクスチャ (`tests/fixtures/{output,skeleton,help}`) は、本家 CLI を入れた Python 環境で再生成できる (fish):
-
-  ```fish
-  uv venv -p 3.12 /tmp/awscli-venv
-  set -x VIRTUAL_ENV /tmp/awscli-venv; uv pip install -e reference/aws-cli
-  /tmp/awscli-venv/bin/python tests/fixtures/output/generate.py > tests/fixtures/output/cases.json
-  set -x AWS_DEFAULT_REGION us-east-1; /tmp/awscli-venv/bin/python tests/fixtures/skeleton/generate.py > tests/fixtures/skeleton/cases.json
-  ```
+- 本家との突き合わせ用フィクスチャ (`tests/fixtures/{output,skeleton,help}`) は `make update-fixtures` で再生成できる (uv と mandoc が必要)。生成スクリプトは各ディレクトリの `generate.py`。
 - ureq は `gzip` 機能を外し、`Accept-Encoding: identity` を送る (botocore = http.client と同じ)。自動解凍されると DynamoDB の `x-amz-crc32` やフレキシブルチェックサムの照合が本文と合わなくなるため。
 - `assets/cli.json` は `scripts/upstream.sh update` が参照中のリリースから複製する (本家 2.39.6 で `--help` が追加された)。
 - `assets/cli.json` は aws-cli の `awscli/data/cli.json` (グローバル引数の説明) の複製。
-- 本家への追従: `upstream.lock` に aws-cli のリリースタグとコミットを記録する。`scripts/upstream.sh` (`fetch` / `latest` / `update`) と `make fetch-upstream` / `make update-upstream`。`update` はサービス・オペレーションの増減と CHANGELOG の該当範囲を `target/upstream-summary.md` に書く。build.rs は lock のタグを `--version` に埋め込み、手元の参照が lock と違えば警告する。`.github/workflows/upstream-sync.yml` が週 1 回これを実行して PR を作る (テスト失敗時は下書き PR)。自動で取り込まれるのはモデル・paginator・waiter・examples まで。手で移植した表 (argrename など) とロジックの変更は対象外。
+- 本家への追従: `upstream.lock` に aws-cli のリリースタグとコミットを記録する。`scripts/upstream.sh` (`fetch` / `latest` / `update` / `fixtures`) と `make fetch-upstream` / `make update-upstream` / `make update-fixtures`。`fixtures` は本家テストの複製 (endpoint-rules / protocols) を同期し、本家 CLI から skeleton / output / help のフィクスチャを再生成する (uv で `target/awscli-venv` を作り、本家の `requirements/download-deps/system-sandbox-lock.txt` の依存だけをハッシュ照合付きで入れる。awscli 本体は `PYTHONPATH` でチェックアウトから実行する。help は mandoc で描画)。ワークフローでは、上流のコードを実行する build ジョブは読み取り専用のトークンで動き、変更をパッチとして publish ジョブに渡す。push と PR 作成は publish だけが行う。`update` はサービス・オペレーションの増減と CHANGELOG の該当範囲を `target/upstream-summary.md` に書く。build.rs は lock のタグを `--version` に埋め込み、手元の参照が lock と違えば警告する。`.github/workflows/upstream-sync.yml` が週 1 回これを実行して PR を作る (テスト失敗時は下書き PR)。自動で取り込まれるのはモデル・paginator・waiter・examples と本家由来のフィクスチャまで。手で移植した表 (argrename など) とロジックの変更は対象外。
 

@@ -16,7 +16,7 @@ import awscli.botocore.session as botocore_session
 from awscli.botocore import xform_name
 from awscli.botocore.utils import ArgumentGenerator
 
-AWS = os.path.join(os.path.dirname(sys.executable), "aws")
+AWS = [sys.executable, "-m", "awscli"]
 
 OPERATIONS = [
     ("sts", "AssumeRole"),
@@ -39,7 +39,7 @@ for command, op in OPERATIONS:
     cli_op = xform_name(op, "-")
     for mode in ("input", "yaml-input"):
         out = subprocess.run(
-            [AWS, command, cli_op, "--generate-cli-skeleton", mode],
+            [*AWS, command, cli_op, "--generate-cli-skeleton", mode],
             check=True,
             capture_output=True,
             text=True,

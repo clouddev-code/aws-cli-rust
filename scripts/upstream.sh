@@ -7,6 +7,11 @@
 #                                      upstream.lock, refresh assets/cli.json
 #                                      and write a summary of the model
 #                                      changes to target/upstream-summary.md
+#   scripts/upstream.sh fixtures       refresh the test fixtures that come
+#                                      from reference/aws-cli (copied test
+#                                      suites, and skeleton / output / help
+#                                      generated with its CLI; needs uv and
+#                                      mandoc)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,6 +19,8 @@ REPO=https://github.com/aws/aws-cli
 REF=reference/aws-cli
 LOCK=upstream.lock
 DATA=$REF/awscli/botocore/data
+FIXTURES=tests/fixtures
+VENV=target/awscli-venv
 
 lock_value() {
     sed -n "s/^$1 *= *//p" "$LOCK"
@@ -83,8 +90,28 @@ update)
         "$REF/CHANGELOG.rst" "$old_tag" "$new_tag" > target/upstream-summary.md
     echo "updated aws-cli $old_tag -> $new_tag ($commit); summary in target/upstream-summary.md"
     ;;
+fixtures)
+    # Test suites copied as they are.
+    rsync -a --delete "$REF/tests/functional/botocore/endpoint-rules/" "$FIXTURES/endpoint-rules/"
+    for dir in input output; do
+        rsync -a --delete "$REF/tests/unit/botocore/protocols/$dir/" "$FIXTURES/protocols/$dir/"
+    done
+    cp "$REF/tests/unit/botocore/protocols/protocol-tests-ignore-list.json" "$FIXTURES/protocols/"
+    # Output of the reference CLI. Only its hash-locked dependencies are
+    # installed; awscli itself runs from the checkout, so nothing of it
+    # (such as its build backend) runs at install time.
+    mkdir -p target
+    uv venv --quiet --clear -p 3.12 "$VENV"
+    VIRTUAL_ENV=$VENV uv pip install --quiet --require-hashes \
+        -r "$REF/requirements/download-deps/system-sandbox-lock.txt"
+    export AWS_DEFAULT_REGION=us-east-1 PYTHONPATH=$REF
+    "$VENV/bin/python" "$FIXTURES/skeleton/generate.py" > "$FIXTURES/skeleton/cases.json"
+    "$VENV/bin/python" "$FIXTURES/output/generate.py" > "$FIXTURES/output/cases.json"
+    "$VENV/bin/python" "$FIXTURES/help/generate.py" "$FIXTURES/help"
+    echo "refreshed the fixtures from aws-cli $(lock_value tag)"
+    ;;
 *)
-    sed -n '2,9p' "$0" >&2
+    sed -n '2,14p' "$0" >&2
     exit 2
     ;;
 esac
