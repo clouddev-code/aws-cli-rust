@@ -114,7 +114,7 @@ jobs:
           mkdir -p target/sync
           # --cached also covers new files (e.g. a new service's endpoint tests).
           git add -A upstream.lock assets/cli.json tests/fixtures
-          git diff --cached --binary > target/sync/changes.patch
+          git diff --cached --binary -- upstream.lock assets/cli.json tests/fixtures > target/sync/changes.patch
           cp target/upstream-summary.md target/test.log target/sync/
 
       - uses: actions/upload-artifact@v4
@@ -150,8 +150,28 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The build job ran fetched code, so check what it hands over: the
+          # tag, and a patch that only edits regular files in the paths the
+          # update touches (no renames, copies, mode changes or symlinks).
+          if ! [[ "$TAG" =~ ^2\.[0-9]+\.[0-9]+$ ]] || [ "$BRANCH" != "upstream/aws-cli-$TAG" ]; then
+            echo "::error::unexpected tag or branch: $TAG $BRANCH"
+            exit 1
+          fi
+          allowed='^(upstream\.lock|assets/cli\.json|tests/fixtures/[^ ]+)$'
+          if git apply --numstat "$SYNC/changes.patch" | cut -f3- | grep -Ev "$allowed"; then
+            echo "::error::the patch touches paths outside the update"
+            exit 1
+          fi
+          if git apply --summary "$SYNC/changes.patch" | grep -Ev '^ (create|delete) mode 100644 '; then
+            echo "::error::the patch renames files or changes modes"
+            exit 1
+          fi
           git switch -c "$BRANCH"
           git apply --index "$SYNC/changes.patch"
+          if git diff --cached --name-only | grep -Ev "$allowed"; then
+            echo "::error::the applied patch touches paths outside the update"
+            exit 1
+          fi
           git commit -m "Update aws-cli to $TAG"
           git push origin "$BRANCH"
           {
