@@ -1,5 +1,6 @@
 # Follows aws-cli releases: when a newer 2.x.y tag exists, moves upstream.lock
-# to it (which changes the embedded models and examples), runs the tests and
+# to it (which changes the embedded models and examples), refreshes the test
+# fixtures that come from aws-cli, runs the tests and
 # opens a pull request with a summary of the model changes and the upstream
 # CHANGELOG. A failing test run opens a draft pull request with the log.
 #
@@ -63,6 +64,13 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Install uv and mandoc
+        if: steps.target.outputs.skip == 'false'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mandoc
+          pipx install uv
+
       - uses: actions/cache@v4
         if: steps.target.outputs.skip == 'false'
         with:
@@ -80,6 +88,7 @@ jobs:
           TAG: ${{ steps.target.outputs.tag }}
         run: |
           scripts/upstream.sh update "$TAG"
+          scripts/upstream.sh fixtures
           set +e
           make test > target/test.log 2>&1
           echo "status=$?" >> "$GITHUB_OUTPUT"
@@ -96,7 +105,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add upstream.lock assets/cli.json
+          git add upstream.lock assets/cli.json tests/fixtures
           git commit -m "Update aws-cli to $TAG"
           git push origin "$BRANCH"
           {
@@ -108,7 +117,8 @@ jobs:
             cat target/upstream-summary.md
             echo
             echo "Models, paginators, waiters and examples are embedded at build time,"
-            echo "so this pull request only moves \`upstream.lock\` (and \`assets/cli.json\`). CLI logic changes in"
+            echo "so this pull request only moves \`upstream.lock\` (and \`assets/cli.json\`,"
+            echo "and the test fixtures that come from aws-cli). CLI logic changes in"
             echo "the CHANGELOG (\`enhancement\`, \`feature\`, \`bugfix\` entries) are not"
             echo "picked up automatically. Run \`make fetch-upstream\` after merging."
             if [ "$STATUS" != "0" ]; then

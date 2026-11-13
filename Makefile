@@ -3,7 +3,7 @@
 CARGO_HOME ?= $(CURDIR)/.cargo-home
 export CARGO_HOME
 
-.PHONY: build test test-debug release fmt clippy fetch-upstream update-upstream
+.PHONY: build test test-debug release fmt clippy fetch-upstream update-upstream update-fixtures
 
 build:
 	cargo build
@@ -28,7 +28,13 @@ clippy:
 fetch-upstream:
 	scripts/upstream.sh fetch
 
-# Move to the latest aws-cli release (or TAG=2.x.y) and run the tests.
+# Move to the latest aws-cli release (or TAG=2.x.y), refresh the fixtures
+# that come from it and run the tests.
 update-upstream:
 	scripts/upstream.sh update $(TAG)
+	scripts/upstream.sh fixtures
 	$(MAKE) test
+
+# Refresh the fixtures from reference/aws-cli (needs uv and mandoc).
+update-fixtures:
+	scripts/upstream.sh fixtures

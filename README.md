@@ -27,11 +27,12 @@ make fetch-upstream
 本家の新しいリリースへの追従:
 
 ```fish
-make update-upstream            # 最新の 2.x.y へ (TAG=2.x.y で指定も可)。テストまで実行
+make update-upstream            # 最新の 2.x.y へ (TAG=2.x.y で指定も可)。フィクスチャの更新とテストまで実行
+make update-fixtures            # 本家由来のフィクスチャだけ更新 (uv と mandoc が必要)
 ./target/release/awsr --version # 埋め込んだモデルの元のリリースを表示
 ```
 
-GitHub Actions の `upstream-sync` が毎週月曜に最新リリースを確認し、新しければ `upstream.lock` を更新してテストし、変更の要約 (サービス・オペレーションの増減、CHANGELOG) を付けた PR を作ります。
+GitHub Actions の `upstream-sync` が火〜土の毎朝に最新リリースを確認し、新しければ `upstream.lock` と本家由来のフィクスチャを更新してテストし、変更の要約 (サービス・オペレーションの増減、CHANGELOG) を付けた PR を作ります。
 
 ## ビルドとテスト
 
