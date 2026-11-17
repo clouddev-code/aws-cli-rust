@@ -156,6 +156,8 @@ pub const ARGUMENT_RENAMES: &[(&str, &str)] = &[
     ),
     ("agent-toolkit.*.name", "skill-name"),
     ("agent-toolkit.search-skills.query", "search-query"),
+    ("opensearchmemory.search-memories.query", "search-query"),
+    ("opensearchmemory.search-events.query", "search-query"),
 ];
 
 /// `argrename.HIDDEN_ALIASES`: the old spelling keeps working, undocumented.
