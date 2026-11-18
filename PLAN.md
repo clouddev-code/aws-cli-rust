@@ -132,13 +132,13 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - `aws s3` の転送は 1 リクエストあたり最大 `multipart_chunksize` をメモリに持つ (既定で最大 8 MiB × 10 並列)。応答本文も、オブジェクトやレンジの期待サイズ + 1 MiB を上限にする。
 - 改名・非表示は `argrename.py`, `removals.py`, `signin.py`, `cloudwatch.py`, `kinesis.py`, ページング (入力トークンの非表示) を反映済み。独自コマンドを作るカスタマイズ (`rds add-option-to-option-group` / `remove-option-from-option-group`, `ses send-email`, `ec2 authorize-security-group-ingress` の簡易引数など) は未実装で、元のオペレーションのまま使う。メンバー名がグローバル引数と同じ場合 (改名表に無いもの) はグローバル側が優先される。
 - S3 Express (CreateSession によるセッション認証) は未対応。
-- リトライ: `standard` は本家 2.40.0 と同じ (既定の最大試行回数 3、DynamoDB / DynamoDB Streams は 4。非スロットリングの基準遅延 50 ms (DynamoDB 系 25 ms)、`x-amz-retry-after`、モデル外の 429 をスロットリング扱い、ロングポーリング操作のクォータ切れ時の待機)。`adaptive` はクライアント側のレート制限が無く `standard` と同じ動作。`legacy` は本家 v2 と同じくリトライしない。`amz-sdk-request` の `ttl` は送らない。
+- リトライ: `standard` は本家 2.41.0 と同じ (既定の最大試行回数 3、DynamoDB / DynamoDB Streams は 4。非スロットリングの基準遅延 50 ms (DynamoDB 系 25 ms)、`x-amz-retry-after`、モデル外の 429 をスロットリング扱い、ロングポーリング操作のクォータ切れ時の待機)。`adaptive` はクライアント側のレート制限が無く `standard` と同じ動作。`legacy` は本家 v2 と同じくリトライしない。`amz-sdk-request` の `ttl` は送らない。
 - `yaml-stream` でページングした場合、本家はページごとに出力するが、awsr は集約した結果を 1 要素として出力する。
 - `--generate-cli-skeleton output` は本家と違い、生成した応答をモデルで検証しない (本家は検証に失敗して出力できない操作がある)。
 - waiter で `--starting-token` / `--page-size` / `--max-items` を指定しても無視する。
 - help: 太字・下線は再現しない。本家 (docutils) の癖のうち、リンク直後の ` .` や docutils の警告文は再現しない。HTML 内の見出し (`<h3>` 等) の位置が少し違う。`aws help topics` は未実装。
 - 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する。JSON では DEL と C1 も `\u009b` のようにエスケープする (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
-- `login` / `sso login` のローカルコールバックは `/oauth/callback` 以外のパスに 404 を返して待ち続ける (本家はパスを確認しない。issue #5)。
+- `login` / `sso login` のローカルコールバックは本家 2.41.0 と同じく、`/oauth/callback` 以外のパスに 404、state が欠けた・一致しないリクエストや code も error もないリクエストに 400 を返して待ち続ける (2.40.4 以前の本家はパスも state も確認していなかった。issue #5)。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
 - `login` の対話はプレーンな標準入力で行う (本家のリージョン補完付きプロンプトや agent toolkit の案内は無い)。
 - `sso login` の vanity URL 解決 (`resolve_start_url`) は未対応で、設定の `sso_start_url` をそのまま使う。
