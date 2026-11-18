@@ -142,6 +142,8 @@ const LONG_POLLING_OPERATIONS: &[(&str, &str)] = &[
     ("sfn", "GetActivityTask"),
     ("swf", "PollForActivityTask"),
     ("swf", "PollForDecisionTask"),
+    ("kinesis", "ReceiveQueueRecords"),
+    ("kinesis", "ReceiveDeadLetterQueueRecords"),
 ];
 const RETRY_COST: u32 = 14;
 const THROTTLING_RETRY_COST: u32 = 5;

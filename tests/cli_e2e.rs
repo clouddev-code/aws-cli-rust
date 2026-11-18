@@ -1444,6 +1444,20 @@ fn long_polling_waits_out_the_delay_when_the_retry_quota_is_used_up() {
             "https://sqs.us-east-1.amazonaws.com/123456789012/q",
         ],
         vec![status(500, ""); 36],
+        env.clone(),
+    )
+    .unwrap();
+    assert_eq!(r.requests.len(), 36);
+    assert_eq!(sleeps.len(), 36);
+    // Added in aws-cli 2.41.0.
+    let (r, sleeps) = run_recording_sleeps(
+        &[
+            "kinesis",
+            "receive-queue-records",
+            "--queue-arn",
+            "arn:aws:kinesis:us-east-1:123456789012:queue/q",
+        ],
+        vec![status(500, ""); 36],
         env,
     )
     .unwrap();

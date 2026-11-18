@@ -123,7 +123,7 @@ impl CallbackServer for FakeCallback {
     fn redirect_uri(&self) -> String {
         "http://127.0.0.1:43210/oauth/callback".into()
     }
-    fn wait(&self) -> Result<Option<(String, String)>, String> {
+    fn wait(&self, _expected_state: &str) -> Result<Option<(String, String)>, String> {
         let url = self
             .opened
             .lock()

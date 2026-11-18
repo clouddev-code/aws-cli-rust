@@ -605,7 +605,7 @@ pub fn auth_code_login(
     );
     on_authorize(&url);
     let (code, returned_state) = server
-        .wait()
+        .wait(&state)
         .map_err(CredentialError::Retrieval)?
         .ok_or_else(|| {
             CredentialError::Retrieval("Failed to retrieve an authorization code.".into())

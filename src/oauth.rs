@@ -19,9 +19,9 @@ const VERIFIER_ALPHABET: &[u8] =
 pub trait CallbackServer {
     /// `http://127.0.0.1:<port>/oauth/callback`.
     fn redirect_uri(&self) -> String;
-    /// Block until the redirect arrives. `Ok(None)` means the provider
-    /// redirected with an `error`.
-    fn wait(&self) -> Result<Option<(String, String)>, String>;
+    /// Block until the redirect carrying `expected_state` arrives. `Ok(None)`
+    /// means the provider redirected with an `error`.
+    fn wait(&self, expected_state: &str) -> Result<Option<(String, String)>, String>;
 }
 
 pub type CallbackFactory<'a> =
@@ -112,14 +112,25 @@ pub fn query_params(target: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Interpret a callback request target: `Some(Some(..))` for code+state,
-/// `Some(None)` for an error redirect, `None` for anything else, including
-/// any path other than the redirect path (awscli does not check the path;
-/// awsr ignores other requests so a stray request cannot end the login).
-pub fn parse_callback(target: &str) -> Option<Option<(String, String)>> {
+/// How the callback server answers one request
+/// (`OAuthCallbackHandler._handle_strict_callback`).
+#[derive(Debug, PartialEq)]
+pub enum Callback {
+    /// The redirect: `Some((code, state))`, or `None` for an `error`.
+    Done(Option<(String, String)>),
+    /// Anything else gets this status and text, and the wait continues, so
+    /// a stray request from another local process or web page cannot end
+    /// the login.
+    Reject(u16, &'static str),
+}
+
+/// Interpret a callback request target. Only a request on the redirect path
+/// whose `state` equals `expected_state` (compared in constant time) ends
+/// the wait.
+pub fn parse_callback(target: &str, expected_state: &str) -> Callback {
     let path = target.split_once('?').map_or(target, |(p, _)| p);
     if path != CALLBACK_PATH {
-        return None;
+        return Callback::Reject(404, "Not found.");
     }
     let params = query_params(target);
     let get = |k: &str| {
@@ -128,10 +139,32 @@ pub fn parse_callback(target: &str) -> Option<Option<(String, String)>> {
             .find(|(pk, _)| pk == k)
             .map(|(_, v)| v.clone())
     };
+    let state = match get("state") {
+        Some(s) if constant_time_eq(s.as_bytes(), expected_state.as_bytes()) => s,
+        _ => {
+            return Callback::Reject(
+                400,
+                "This request does not belong to the sign-in in progress. \
+                 Return to the terminal and use the URL it displayed.",
+            );
+        }
+    };
     if get("error").is_some() {
-        return Some(None);
+        return Callback::Done(None);
     }
-    Some(Some((get("code")?, get("state")?)))
+    match get("code") {
+        Some(code) => Callback::Done(Some((code, state))),
+        None => Callback::Reject(
+            400,
+            "The request has neither an authorization code nor an error.",
+        ),
+    }
+}
+
+/// `hmac.compare_digest`: the time taken does not depend on where the
+/// inputs differ.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// The real callback receiver: a one-shot HTTP listener on 127.0.0.1.
@@ -157,7 +190,7 @@ impl CallbackServer for LocalCallbackServer {
         format!("http://127.0.0.1:{port}{CALLBACK_PATH}")
     }
 
-    fn wait(&self) -> Result<Option<(String, String)>, String> {
+    fn wait(&self, expected_state: &str) -> Result<Option<(String, String)>, String> {
         let deadline = Instant::now() + OVERALL_TIMEOUT;
         while Instant::now() < deadline {
             let (mut stream, _) = match self.listener.accept() {
@@ -182,13 +215,21 @@ impl CallbackServer for LocalCallbackServer {
                 header.clear();
             }
             let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
-            let Some(result) = parse_callback(&target) else {
-                // Not the redirect (favicon, probes, other paths): keep waiting.
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                );
-                continue;
+            let result = match parse_callback(&target, expected_state) {
+                Callback::Done(result) => result,
+                Callback::Reject(status, text) => {
+                    let reason = if status == 404 {
+                        "Not Found"
+                    } else {
+                        "Bad Request"
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}\n",
+                        text.len() + 1
+                    );
+                    continue;
+                }
             };
             let _ = write!(
                 stream,
@@ -218,19 +259,30 @@ mod tests {
 
     #[test]
     fn callback_parsing() {
+        let parse = |t| parse_callback(t, "s-1");
+        let status = |t| match parse(t) {
+            Callback::Reject(status, _) => status,
+            Callback::Done(r) => panic!("{t} ended the wait with {r:?}"),
+        };
         assert_eq!(
-            parse_callback("/oauth/callback?code=abc%2F1&state=s-1"),
-            Some(Some(("abc/1".into(), "s-1".into())))
+            parse("/oauth/callback?code=abc%2F1&state=s-1"),
+            Callback::Done(Some(("abc/1".into(), "s-1".into())))
         );
         assert_eq!(
-            parse_callback("/oauth/callback?error=access_denied"),
-            Some(None)
+            parse("/oauth/callback?error=access_denied&state=s-1"),
+            Callback::Done(None)
         );
-        assert_eq!(parse_callback("/favicon.ico"), None);
+        assert_eq!(status("/favicon.ico"), 404);
         // Only the redirect path counts (issue #5).
-        assert_eq!(parse_callback("/other?code=c&state=s"), None);
-        assert_eq!(parse_callback("/x?error=access_denied"), None);
-        assert_eq!(parse_callback("/oauth/callback/x?code=c&state=s"), None);
+        assert_eq!(status("/other?code=c&state=s-1"), 404);
+        assert_eq!(status("/x?error=access_denied&state=s-1"), 404);
+        assert_eq!(status("/oauth/callback/x?code=c&state=s-1"), 404);
+        // Only the sign-in in progress counts (aws-cli 2.41.0).
+        assert_eq!(status("/oauth/callback?code=c&state=forged"), 400);
+        assert_eq!(status("/oauth/callback?code=c&state=s-12"), 400);
+        assert_eq!(status("/oauth/callback?code=c"), 400);
+        assert_eq!(status("/oauth/callback?error=access_denied"), 400);
+        assert_eq!(status("/oauth/callback?state=s-1"), 400);
     }
 
     /// Binds a real loopback port, so it is opt-in (`cargo test -- --ignored`).
@@ -265,13 +317,19 @@ mod tests {
             let _ = s.read_to_string(&mut buf);
             assert!(buf.starts_with("HTTP/1.1 404"), "{buf}");
             let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(b"GET /oauth/callback?code=x&state=forged HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+            let mut buf = String::new();
+            let _ = s.read_to_string(&mut buf);
+            assert!(buf.starts_with("HTTP/1.1 400"), "{buf}");
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
             s.write_all(b"GET /oauth/callback?code=c1&state=s1 HTTP/1.1\r\nHost: x\r\nUser-Agent: test\r\nAccept: text/html\r\n\r\n")
                 .unwrap();
             let mut page = String::new();
             let _ = s.read_to_string(&mut page);
             page
         });
-        assert_eq!(server.wait().unwrap(), Some(("c1".into(), "s1".into())));
+        assert_eq!(server.wait("s1").unwrap(), Some(("c1".into(), "s1".into())));
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK"));
     }
 
