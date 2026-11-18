@@ -340,7 +340,7 @@ pub fn interactive_login(
             &redirect,
         )));
         let (code, st) = server
-            .wait()
+            .wait(&state)
             .map_err(load_err)?
             .ok_or_else(|| load_err("Failed to retrieve an authorization code."))?;
         (CLIENT_ID_SAME_DEVICE, redirect, code, st)
