@@ -9,8 +9,7 @@
 # the publish job as a patch; only publish can push and open the pull request.
 #
 # Requires "Allow GitHub Actions to create and approve pull requests"
-# (Settings > Actions > General). Pull requests opened with GITHUB_TOKEN do
-# not trigger other workflows, so oss-scan does not run on them by itself.
+# (Settings > Actions > General).
 name: upstream-sync
 
 on:
