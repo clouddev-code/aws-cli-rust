@@ -101,7 +101,7 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/shorthand_cases.rs` | awscli の shorthand テスト表 (AST で抽出) | 103 ケース 全件成功 |
 | `tests/all_models.rs` | 全モデルの全オペレーションで引数表構築 + ダミー値でシリアライズ | 433 サービス / 19,412 オペレーション 成功 |
 | `tests/cli_e2e.rs` | 偽 Transport + 実モデルで argv → 署名済みリクエスト → 出力 | 18 テスト 成功 |
-| `tests/credentials_p3.rs` | 偽 Transport + 偽コールバック + 一時 HOME で各プロバイダ, キャッシュ (0600, 本家 CLI 形式のキャッシュを再利用), login (PKCE / remote / state 検証), sso login (PKCE / デバイスコード), sso logout | 19 テスト 成功 |
+| `tests/credentials_p3.rs` | 偽 Transport + 偽コールバック + 一時 HOME で各プロバイダ, キャッシュ (0600, 本家 CLI 形式のキャッシュを再利用), login (PKCE / remote / state 検証), sso login (PKCE / デバイスコード), sso logout, `credential_cache` (file / memory / 不正値) | 21 テスト 成功 |
 | `tests/protocol_input.rs` / `protocol_output.rs` (P4 追加分) | smithy-rpc-v2-cbor (通常 / query 互換 / 非 query 互換)。CBOR はエンコード方法が複数あり得るため、デコード結果で比較 | 入力 24 / 出力 41 ケース 全件成功 |
 | `tests/sigv4a_suite.rs` | aws-c-auth の SigV4a テストスイート (botocore が awscrt 経由で使う実装)。導出公開鍵・正規リクエスト・署名対象文字列の一致と ECDSA 署名の検証 | 28 ケース 全件成功 (botocore で到達しない組み合わせ 10 件と期待値の無い 2 件を除外)。S3 フレーバー (正規化なし + X-Amz-Content-SHA256) のケースはスイートに無く、MRAP の SigV4a は S3 SigV4 と共通の経路で担保している |
 | `tests/cli_e2e.rs` (P4 追加分) | 必須チェックサム (CRC64NVME), PutObject の aws-chunked トレーラ, `--checksum-algorithm`, `when_required`, 設定値の検証, GetObject の `outfile` とレスポンス検証, EventBridge グローバルエンドポイントの SigV4a, S3 Select / Lambda / Kinesis の event stream | 計 23 テスト 成功 |
@@ -113,7 +113,9 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 | `tests/completion.rs` (P5) | コマンド, オペレーション, waiter, 引数名 (非表示・使用済みを除く), 値 (選択肢, プロファイル, リージョン, enum) | 2 テスト 成功 |
 | チェックサム単体テスト | botocore `_CHECKSUM_DIGEST_CASES` と同じ期待値 (XXHASH3/128 を含む全アルゴリズム), aws-chunked の形式 | 成功 |
 | event stream 単体テスト | botocore `test_eventstream.py` の正常系・異常系ベクタ (CRC 不一致, 重複ヘッダ, ヘッダ長超過) | 成功 |
+| `tests/cli_e2e.rs` (2.42.1 追加分) | hostLabel の値の検証 (neptune-graph の `{graphIdentifier}.` ホストプレフィックス、本家と同文のエラー・終了コード 252) | 成功 |
 | `oauth::tests::local_callback_server_receives_redirect` | 実際に 127.0.0.1 で待ち受けるコールバックサーバ (ポートを使うため `--ignored`) | サンドボックス外で成功 |
+| `oauth::tests::slow_callback_connection_is_cut_off` | 1 バイトずつ送るコールバック接続が時間上限で打ち切られること (ポートを使うため `--ignored`) | サンドボックス外で成功 |
 
 実通信の確認 (P3b): 偽の refresh token で実際の Sign-In `/v1/token` に DPoP 付きで送り、`ValidationException` (終了コード 255) が解析されることを確認済み。
 | 単体テスト (`src/**`) | xform_name, 設定, 認証情報, タイムスタンプ, text 出力, ページング, DPoP 署名検証, コンテナのホスト制限 など | 24 テスト 成功 |
