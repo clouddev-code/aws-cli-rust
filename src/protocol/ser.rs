@@ -34,6 +34,33 @@ pub fn serialize(op: &Operation, params: &Value) -> Result<Serialized> {
     Ok(out)
 }
 
+static HOST_LABEL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9.\-]+$").unwrap());
+
+/// The `ParamValidationError` report for host label members that are not a
+/// string of letters, digits, hyphens or periods (aws-cli 2.41.2). Only
+/// operations with a host prefix are checked.
+pub fn check_host_labels(op: &Operation, params: &Value) -> std::result::Result<(), String> {
+    let (Some(_), Some(input)) = (op.host_prefix(), op.input()) else {
+        return Ok(());
+    };
+    let bad: Vec<&str> = input
+        .members()
+        .into_iter()
+        .filter(|(_, member)| member.bool_trait("hostLabel"))
+        .filter(|(name, _)| {
+            !matches!(params.get(name), Some(Value::Str(s)) if HOST_LABEL_RE.is_match(s))
+        })
+        .map(|(name, _)| name)
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Invalid value for parameter(s): {}. Must contain only alphanumeric characters, hyphen, or period.",
+        bad.join(", ")
+    ))
+}
+
 fn expand_host_prefix(op: &Operation, params: &Value) -> Result<Option<String>> {
     let Some(prefix) = op.host_prefix() else {
         return Ok(None);

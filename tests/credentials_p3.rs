@@ -355,6 +355,72 @@ fn role_chaining_with_mfa_prompt() {
 }
 
 #[test]
+fn credential_cache_memory_keeps_role_credentials_out_of_the_file_cache() {
+    // aws-cli 2.42.0 `credential_cache`: each hop follows its own profile.
+    let home = Home::new("credcache");
+    let token = home.write("token.jwt", "eyJ.token.sig");
+    let config = format!(
+        "[profile admin]\nrole_arn = arn:aws:iam::1:role/admin\nsource_profile = base\nrole_session_name = me\ncredential_cache = memory\n\
+         [profile filed]\nrole_arn = arn:aws:iam::1:role/filed\nsource_profile = base\nrole_session_name = me\ncredential_cache = file\n\
+         [profile web]\nrole_arn = arn:aws:iam::1:role/web\nweb_identity_token_file = {}\nrole_session_name = pod\ncredential_cache = memory\n\
+         [profile bad]\nrole_arn = arn:aws:iam::1:role/bad\nsource_profile = base\ncredential_cache = disk\n",
+        token.display()
+    );
+    let mut s = Setup::new(&home, &config);
+    s.credentials = "[base]\naws_access_key_id = AKIDBASE\naws_secret_access_key = basesecret\n";
+    let cache_dir = home.path(".aws/cli/cache");
+    for _ in 0..2 {
+        let Some(r) = s.run(
+            &["sts", "get-caller-identity", "--profile", "admin"],
+            vec![assume_role_response("ASIAROLE"), ok(CALLER_IDENTITY)],
+        ) else {
+            return;
+        };
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        assert_eq!(r.requests.len(), 2, "every run calls AssumeRole");
+        assert!(cache_files(&cache_dir).is_empty());
+    }
+
+    let web = ok(
+        "<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>\
+        <AccessKeyId>ASIAWEB</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t</SessionToken>\
+        <Expiration>2015-08-30T13:36:00Z</Expiration></Credentials></AssumeRoleWithWebIdentityResult>\
+        </AssumeRoleWithWebIdentityResponse>",
+    );
+    let r = s
+        .run(
+            &["sts", "get-caller-identity", "--profile", "web"],
+            vec![web, ok(CALLER_IDENTITY)],
+        )
+        .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(access_key(&r.requests[1]), "ASIAWEB");
+    assert!(cache_files(&cache_dir).is_empty());
+
+    let r = s
+        .run(
+            &["sts", "get-caller-identity", "--profile", "filed"],
+            vec![assume_role_response("ASIAFILE"), ok(CALLER_IDENTITY)],
+        )
+        .unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(cache_files(&cache_dir).len(), 1);
+
+    let r = s
+        .run(&["sts", "get-caller-identity", "--profile", "bad"], vec![])
+        .unwrap();
+    assert_eq!(r.code, 253);
+    assert!(r.requests.is_empty());
+    assert!(
+        r.stderr.contains(
+            "The credential_cache \"disk\" in profile \"bad\" is not valid. Valid values are: file, memory."
+        ),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
 fn assume_role_configuration_errors() {
     let home = Home::new("loop");
     let s = Setup::new(

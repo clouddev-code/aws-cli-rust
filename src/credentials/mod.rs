@@ -184,6 +184,7 @@ impl<'a> Resolver<'a> {
 
     fn assume_role(&self, name: &str, visited: &mut Vec<String>) -> Result<Credentials> {
         let profile = self.profile_section(name);
+        let file_cache = file_cache(name, &profile)?;
         let role_arn = profile.get("role_arn").cloned().unwrap_or_default();
         let source_profile = profile.get("source_profile").cloned();
         let credential_source = profile.get("credential_source").cloned();
@@ -231,7 +232,12 @@ impl<'a> Resolver<'a> {
             args.insert("DurationSeconds".into(), J::from(v));
         }
         let key = role_cache_key(&args, default_session_name);
-        self.cached_sts("AssumeRole", args, &key, Some(source))
+        self.cached_sts(
+            "AssumeRole",
+            args,
+            file_cache.then_some(key.as_str()),
+            Some(source),
+        )
     }
 
     /// `_resolve_credentials_from_profile` with the visited-profile checks.
@@ -308,6 +314,9 @@ impl<'a> Resolver<'a> {
                 "The provided profile or the current environment is configured to assume role with web identity but has no role ARN configured. Ensure that the profile has the role_arn configuration set or the AWS_ROLE_ARN env var is set.".into(),
             )
         })?;
+        // credential_cache is a key of the profile in use, even when the token
+        // file or role ARN comes from the environment.
+        let file_cache = file_cache(name, &profile)?;
         let token = std::fs::read_to_string(&token_file).map_err(|e| {
             CredentialError::Retrieval(format!(
                 "Unable to read web identity token file {token_file}: {e}"
@@ -334,21 +343,29 @@ impl<'a> Resolver<'a> {
         key_args.insert("WebIdentityToken".into(), J::String(token.clone()));
         let key = role_cache_key(&key_args, default_session_name);
         args.insert("WebIdentityToken".into(), J::String(token));
-        self.cached_sts("AssumeRoleWithWebIdentity", args, &key, None)
-            .map(Some)
+        self.cached_sts(
+            "AssumeRoleWithWebIdentity",
+            args,
+            file_cache.then_some(key.as_str()),
+            None,
+        )
+        .map(Some)
     }
 
     /// Serve from `~/.aws/cli/cache` or call STS and cache the response.
+    /// Without a `key` (`credential_cache = memory`) the file cache is not
+    /// used: credentials are resolved once per command, so a memory cache
+    /// would never be hit.
     fn cached_sts(
         &self,
         op: &str,
         mut args: serde_json::Map<String, J>,
-        key: &str,
+        key: Option<&str>,
         signing: Option<Credentials>,
     ) -> Result<Credentials> {
         let cache = self.cli_cache();
-        if let Some(c) = cache
-            .get(key)
+        if let Some(c) = key
+            .and_then(|k| cache.get(k))
             .and_then(|v| fresh_credentials(&v, (self.ctx.now)()))
         {
             return Ok(c);
@@ -417,7 +434,9 @@ impl<'a> Resolver<'a> {
             }
         }
         // A cache write failure must not fail the command.
-        let _ = cache.set(key, &cached);
+        if let Some(key) = key {
+            let _ = cache.set(key, &cached);
+        }
         fresh_credentials(&cached, DateTime::<Utc>::MIN_UTC)
             .ok_or_else(|| CredentialError::Retrieval("invalid STS credentials".into()))
     }
@@ -428,6 +447,18 @@ pub(crate) fn retrieval(what: &'static str) -> impl Fn(ClientError) -> Credentia
         CredentialError::Retrieval(format!(
             "Error when retrieving credentials from {what}: {e}"
         ))
+    }
+}
+
+/// A profile's `credential_cache` (aws-cli 2.42.0): `file` or unset keeps
+/// `~/.aws/cli/cache`, `memory` keeps the credentials out of it.
+fn file_cache(profile_name: &str, profile: &Section) -> Result<bool> {
+    match profile.get("credential_cache").map(String::as_str) {
+        None | Some("file") => Ok(true),
+        Some("memory") => Ok(false),
+        Some(other) => Err(CredentialError::Config(format!(
+            "The credential_cache \"{other}\" in profile \"{profile_name}\" is not valid. Valid values are: file, memory."
+        ))),
     }
 }
 

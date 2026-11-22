@@ -175,6 +175,13 @@ const THROTTLED_ERROR_CODES: &[&str] = &[
 
 /// `ModeledRetryErrorDetector`: the operation's modeled error that `code`
 /// names, by shape name or modeled error code.
+/// `Serializer.serialize_to_request`, with its host label check reported as
+/// a `ParamValidationError` (it runs even with parameter validation off).
+fn serialize(op: &Operation, params: &Value) -> Result<crate::protocol::Serialized, ClientError> {
+    ser::check_host_labels(op, params).map_err(ClientError::Validation)?;
+    ser::serialize(op, params).map_err(|e| ClientError::Params(e.to_string()))
+}
+
 fn modeled_error<'m>(op: &Operation<'m>, code: &str) -> Option<Shape<'m>> {
     op.get("errors")
         .and_then(J::as_array)
@@ -396,8 +403,7 @@ impl<'a> Client<'a> {
         if let Some(input) = op.input() {
             crate::validate::validate(params, &input).map_err(ClientError::Validation)?;
         }
-        let serialized =
-            ser::serialize(&op, params).map_err(|e| ClientError::Params(e.to_string()))?;
+        let serialized = serialize(&op, params)?;
         let mut base = serialized.into_request(&endpoint.url);
         for (name, values) in &endpoint.headers {
             let joined = values
@@ -644,9 +650,7 @@ impl<'a> Client<'a> {
         if let Some(input) = op.input() {
             crate::validate::validate(params, &input).map_err(ClientError::Validation)?;
         }
-        let mut req = ser::serialize(&op, params)
-            .map_err(|e| ClientError::Params(e.to_string()))?
-            .into_request(&endpoint.url);
+        let mut req = serialize(&op, params)?.into_request(&endpoint.url);
         let creds = self
             .credentials
             .as_ref()
@@ -675,8 +679,7 @@ impl<'a> Client<'a> {
         let endpoint = RuleSet::new(&self.rules, &self.partitions)
             .resolve(&self.endpoint_params(&op, params))
             .map_err(|e| ClientError::Endpoint(e.to_string()))?;
-        let serialized =
-            ser::serialize(&op, params).map_err(|e| ClientError::Params(e.to_string()))?;
+        let serialized = serialize(&op, params)?;
         let req = serialized.into_request(&endpoint.url);
         Ok(format!("{}://{}", req.scheme, req.host))
     }

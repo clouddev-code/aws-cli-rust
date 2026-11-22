@@ -1990,3 +1990,47 @@ fn auth_scheme_preference_reorders_the_service_schemes() {
         "AWS4-ECDSA-P256-SHA256"
     );
 }
+
+#[test]
+fn host_labels_must_be_host_safe() {
+    // aws-cli 2.41.2: the serializer rejects host label values with
+    // characters other than letters, digits, hyphens and periods.
+    let Some(r) = run(
+        &[
+            "neptune-graph",
+            "get-graph-summary",
+            "--graph-identifier",
+            "g-1.x",
+        ],
+        vec![ok("{}")],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.requests[0].host.starts_with("g-1.x."),
+        "{}",
+        r.requests[0].host
+    );
+
+    let Some(r) = run(
+        &[
+            "neptune-graph",
+            "get-graph-summary",
+            "--graph-identifier",
+            "evil.com/",
+        ],
+        vec![],
+    ) else {
+        return;
+    };
+    assert_eq!(r.code, 252, "{}", r.stderr);
+    assert!(r.requests.is_empty());
+    assert!(
+        r.stderr.contains(
+            "Parameter validation failed:\nInvalid value for parameter(s): graphIdentifier. Must contain only alphanumeric characters, hyphen, or period."
+        ),
+        "{}",
+        r.stderr
+    );
+}
