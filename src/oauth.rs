@@ -4,14 +4,17 @@
 use base64::Engine;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 pub const CALLBACK_PATH: &str = "/oauth/callback";
 pub const REDIRECT_URI_WITHOUT_PORT: &str = "http://127.0.0.1/oauth/callback";
 const OVERALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The shortest per-read timeout a callback connection gets (a zero timeout
+/// is not accepted by `set_read_timeout`).
+const MIN_READ_TIMEOUT: Duration = Duration::from_millis(10);
 const VERIFIER_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
@@ -181,6 +184,30 @@ impl LocalCallbackServer {
     }
 }
 
+/// Reads a callback connection until `until`. Each read waits no longer than
+/// what is left, so a client that sends a byte at a time cannot keep the
+/// connection, and the wait, going (aws-cli 2.42.0
+/// `_DeadlineOAuthCallbackHandler`).
+struct DeadlineReader<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the callback connection took too long",
+            ));
+        }
+        self.stream
+            .set_read_timeout(Some(left.max(MIN_READ_TIMEOUT)))?;
+        (&mut &*self.stream).read(buf)
+    }
+}
+
 const SUCCESS_PAGE: &str = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>AWS CLI</title></head>\
 <body><h1>Request approved</h1><p>You can close this window and return to the command line.</p></body></html>";
 
@@ -202,17 +229,23 @@ impl CallbackServer for LocalCallbackServer {
                 Err(e) => return Err(e.to_string()),
             };
             let _ = stream.set_nonblocking(false);
-            let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
-            let mut reader = BufReader::new(&stream);
+            // Each connection gets REQUEST_TIMEOUT in total, and no more than
+            // the wait has left.
+            let allowed = REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+            let _ = stream.set_write_timeout(Some(allowed.max(MIN_READ_TIMEOUT)));
+            let mut reader = BufReader::new(DeadlineReader {
+                stream: &stream,
+                until: Instant::now() + allowed,
+            });
             let mut line = String::new();
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
             // Drain the headers before answering; closing with unread data
-            // makes browsers show "connection reset" instead of the page.
-            let mut header = String::new();
-            while reader.read_line(&mut header).is_ok_and(|n| n > 0) && !header.trim().is_empty() {
-                header.clear();
+            // makes browsers show "connection reset" instead of the page. A
+            // connection that runs out of time is dropped unanswered.
+            if !drain_headers(&mut reader) {
+                continue;
             }
             let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
             let result = match parse_callback(&target, expected_state) {
@@ -239,6 +272,21 @@ impl CallbackServer for LocalCallbackServer {
             return Ok(result);
         }
         Err("Timed out waiting for the authorization redirect from the browser.".into())
+    }
+}
+
+/// Read up to the blank line (or EOF) that ends the headers; false when the
+/// connection failed or ran out of time first.
+fn drain_headers(reader: &mut impl BufRead) -> bool {
+    let mut header = String::new();
+    loop {
+        header.clear();
+        match reader.read_line(&mut header) {
+            Ok(0) => return true,
+            Ok(_) if header.trim().is_empty() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
     }
 }
 
@@ -331,6 +379,43 @@ mod tests {
         });
         assert_eq!(server.wait("s1").unwrap(), Some(("c1".into(), "s1".into())));
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK"));
+    }
+
+    /// A client that trickles bytes is cut off once the connection's time is
+    /// up. Binds a real loopback port, so it is opt-in.
+    #[test]
+    #[ignore]
+    fn slow_callback_connection_is_cut_off() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            for b in b"GET /oauth/callback?code=c&state=s HTTP/1.1\r\n" {
+                if s.write_all(&[*b]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let start = Instant::now();
+        let mut reader = BufReader::new(DeadlineReader {
+            stream: &stream,
+            until: start + Duration::from_millis(300),
+        });
+        let mut line = String::new();
+        let err = reader.read_line(&mut line).unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ),
+            "{err:?}"
+        );
+        assert!(start.elapsed() < Duration::from_millis(1000));
+        drop(reader);
+        drop(stream);
+        client.join().unwrap();
     }
 
     #[test]

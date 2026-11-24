@@ -158,6 +158,10 @@ pub const ARGUMENT_RENAMES: &[(&str, &str)] = &[
     ("agent-toolkit.search-skills.query", "search-query"),
     ("opensearchmemory.search-memories.query", "search-query"),
     ("opensearchmemory.search-events.query", "search-query"),
+    (
+        "rtbfabric.get-available-module-version.version",
+        "module-version",
+    ),
 ];
 
 /// `argrename.HIDDEN_ALIASES`: the old spelling keeps working, undocumented.
@@ -215,6 +219,10 @@ pub const REMOVED_COMMANDS: &[(&str, &[&str])] = &[
     (
         "sagemaker-runtime",
         &["invoke-endpoint-with-response-stream"],
+    ),
+    (
+        "sagemaker-gateway-runtime",
+        &["invoke-global-inference-gateway-with-response-stream"],
     ),
     (
         "bedrock-runtime",
