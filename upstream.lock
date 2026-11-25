@@ -2,5 +2,5 @@
 # reference checkout (reference/aws-cli) come from.
 #   make fetch-upstream             check out this release
 #   make update-upstream [TAG=...]  move to the latest (or given) release
-tag = 2.42.2
-commit = 1a7a8cef728a4e0aab4af2f39397e92329f9aca8
+tag = 2.42.3
+commit = f43730d363f33feef299349d89074f412b40e115
