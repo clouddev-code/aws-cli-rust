@@ -311,7 +311,8 @@ fn login_config(
 ) -> Result<SsoConfig, Failure> {
     let section = ctx.config.profile(profile);
     if explicit && section.is_none() {
-        return Err(Failure::config(format!(
+        // botocore `ProfileNotFound`.
+        return Err(Failure::general(format!(
             "The config profile ({profile}) could not be found"
         )));
     }

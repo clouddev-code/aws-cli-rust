@@ -141,7 +141,8 @@ I/O は `driver::Context` に集約しています (`Transport`、環境変数�
 - help: 太字・下線は再現しない。本家 (docutils) の癖のうち、リンク直後の ` .` や docutils の警告文は再現しない。HTML 内の見出し (`<h3>` 等) の位置が少し違う。`aws help topics` は未実装。
 - 端末に出力するとき、text / table の値、`aws s3` の出力行、エラーメッセージに含まれる制御文字 (改行・タブ以外の C0、DEL、C1) を `\x1b` のように表示する。JSON では DEL と C1 も `\u009b` のようにエスケープする (本家はそのまま出す。issue #4)。パイプやファイルへの出力は変えない。
 - `login` / `sso login` のローカルコールバックは本家 2.41.0 と同じく、`/oauth/callback` 以外のパスに 404、state が欠けた・一致しないリクエストや code も error もないリクエストに 400 を返して待ち続ける (2.40.4 以前の本家はパスも state も確認していなかった。issue #5)。各接続は合計 10 秒 (待ちの残り時間がそれより短ければ残り時間) で打ち切る (本家 2.42.0。1 バイトずつ送るクライアントが待ちを引き延ばせないようにする)。
-- `credential_cache = memory` (本家 2.42.0、assume-role と web identity のプロファイル): awsr は 1 回の実行で認証情報を 1 回しか解決しないため、`~/.aws/cli/cache` を読み書きしないだけの動作になる。値が `file` / `memory` 以外のときは本家と同文のエラーを出すが、終了コードは awsr の他の設定エラー (`source_profile` と `credential_source` の併記など) と同じ 253 (本家は `InvalidConfigError` を 255 で返す)。
+- `credential_cache = memory` (本家 2.42.0、assume-role と web identity のプロファイル): awsr は 1 回の実行で認証情報を 1 回しか解決しないため、`~/.aws/cli/cache` を読み書きしないだけの動作になる。値が `file` / `memory` 以外のときは本家と同文のエラーを終了コード 255 で出す。
+- 終了コード 253 は本家の `errorhandler.py` と同じく `ConfigurationError` (`aws login` の既存認証情報、`sso login` の `InvalidSSOConfigError`)、`NoRegionError`、`NoCredentialsError` だけ。botocore 自身の設定エラー (`ProfileNotFound`、`InvalidConfigError`、`PartialCredentialsError`、リトライ設定の誤り) と s3 の転送設定の誤りは 255。以前の awsr はこれらも 253 で返していた。
 - 補完はローカルのモデルだけを使う (本家 v2 のサーバー側補完 = リソース名の候補は無い)。
 - `login` の対話はプレーンな標準入力で行う (本家のリージョン補完付きプロンプトや agent toolkit の案内は無い)。
 - `sso login` の vanity URL 解決 (`resolve_start_url`) は未対応で、設定の `sso_start_url` をそのまま使う。

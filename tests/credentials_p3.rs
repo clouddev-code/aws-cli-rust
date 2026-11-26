@@ -409,7 +409,7 @@ fn credential_cache_memory_keeps_role_credentials_out_of_the_file_cache() {
     let r = s
         .run(&["sts", "get-caller-identity", "--profile", "bad"], vec![])
         .unwrap();
-    assert_eq!(r.code, 253);
+    assert_eq!(r.code, 255);
     assert!(r.requests.is_empty());
     assert!(
         r.stderr.contains(
@@ -431,7 +431,7 @@ fn assume_role_configuration_errors() {
     let Some(r) = s.run(&["sts", "get-caller-identity", "--profile", "a"], vec![]) else {
         return;
     };
-    assert_eq!(r.code, 253);
+    assert_eq!(r.code, 255);
     assert!(
         r.stderr
             .contains("Infinite loop in credential configuration detected"),
@@ -441,13 +441,70 @@ fn assume_role_configuration_errors() {
     let r = s
         .run(&["sts", "get-caller-identity", "--profile", "both"], vec![])
         .unwrap();
-    assert_eq!(r.code, 253);
+    assert_eq!(r.code, 255);
     assert!(
         r.stderr
             .contains("contains both source_profile and credential_source"),
         "{}",
         r.stderr
     );
+}
+
+/// awscli `errorhandler.py`: only `ConfigurationError` (here
+/// `InvalidSSOConfigError` from `sso login`), `NoRegionError` and
+/// `NoCredentialsError` exit with 253. botocore's own configuration errors
+/// (`ProfileNotFound`, `InvalidConfigError`) are general errors (255).
+#[test]
+fn configuration_error_exit_codes() {
+    let home = Home::new("cfgrc");
+    let s = Setup::new(
+        &home,
+        "[profile dev]\nsso_session = missing\nsso_account_id = 1\nsso_role_name = r\n",
+    );
+    let Some(r) = s.run(&["sts", "get-caller-identity", "--profile", "nope"], vec![]) else {
+        return;
+    };
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr
+            .contains("The config profile (nope) could not be found"),
+        "{}",
+        r.stderr
+    );
+    let r = s
+        .run(&["sso", "login", "--profile", "nope"], vec![])
+        .unwrap();
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr
+            .contains("The config profile (nope) could not be found"),
+        "{}",
+        r.stderr
+    );
+
+    // The same missing sso-session: `InvalidSSOConfigError` from `sso
+    // login`, botocore `InvalidConfigError` from the SSO provider.
+    let r = s
+        .run(&["sso", "login", "--profile", "dev"], vec![])
+        .unwrap();
+    assert_eq!(r.code, 253);
+    assert!(
+        r.stderr
+            .contains("The specified sso-session does not exist: \"missing\""),
+        "{}",
+        r.stderr
+    );
+    let r = s
+        .run(&["sts", "get-caller-identity", "--profile", "dev"], vec![])
+        .unwrap();
+    assert_eq!(r.code, 255);
+    assert!(
+        r.stderr
+            .contains("The specified sso-session does not exist: \"missing\""),
+        "{}",
+        r.stderr
+    );
+    assert!(r.requests.is_empty());
 }
 
 #[test]

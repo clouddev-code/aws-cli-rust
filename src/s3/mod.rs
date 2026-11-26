@@ -289,7 +289,8 @@ fn transfer_config(ctx: &Context, profile: &str) -> Result<TransferConfig, Failu
     let mut cfg = TransferConfig::default();
     let get = |k: &str| ctx.config.get(profile, &format!("s3.{k}"));
     let invalid = |k: &str, v: &str| {
-        Failure::config(format!("Value for {k} must be a positive integer: {v}"))
+        // `transferconfig.InvalidConfigError`.
+        Failure::general(format!("Value for {k} must be a positive integer: {v}"))
     };
     if let Some(v) = get("max_concurrent_requests") {
         cfg.max_concurrent_requests = v
