@@ -1325,7 +1325,7 @@ fn standard_retries_transient_and_throttling_errors() {
     let mut env = default_env();
     env.insert("AWS_RETRY_MODE".into(), "bogus".into());
     let (r, _) = run_recording_sleeps(&["sts", "get-caller-identity"], vec![], env).unwrap();
-    assert_eq!(r.code, 253);
+    assert_eq!(r.code, 255);
     assert!(r.stderr.contains("retry_mode"), "{}", r.stderr);
 
     // Connection errors are retried too.

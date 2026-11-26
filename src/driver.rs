@@ -697,7 +697,8 @@ pub(crate) fn service_client<'a>(
 ) -> Result<Client<'a>, Failure> {
     let profile = profile_name(ctx, globals);
     if globals.profile.is_some() && ctx.config.profile(&profile).is_none() {
-        return Err(Failure::config(format!(
+        // botocore `ProfileNotFound`.
+        return Err(Failure::general(format!(
             "The config profile ({profile}) could not be found"
         )));
     }
@@ -774,7 +775,8 @@ pub(crate) fn retry_config(ctx: &Context, profile: &str) -> Result<RetryConfig, 
         get("AWS_RETRY_MODE", "retry_mode").as_deref(),
         get("AWS_MAX_ATTEMPTS", "max_attempts").as_deref(),
     )
-    .map_err(Failure::config)
+    // botocore `InvalidRetryConfigurationError`.
+    .map_err(Failure::general)
 }
 
 /// `--region` -> `AWS_REGION` -> `AWS_DEFAULT_REGION` -> profile `region`.

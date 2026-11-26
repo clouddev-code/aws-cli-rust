@@ -190,7 +190,7 @@ fn main() {
         Ok(l) => l,
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(exit::CONFIG);
+            std::process::exit(exit::GENERAL);
         }
     };
     let config = SharedConfig::load();

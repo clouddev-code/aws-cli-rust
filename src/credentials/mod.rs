@@ -35,8 +35,13 @@ pub enum CredentialError {
 impl CredentialError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            CredentialError::NotFound | CredentialError::Config(_) => crate::driver::exit::CONFIG,
-            CredentialError::Retrieval(_) => crate::driver::exit::GENERAL,
+            // `NoCredentialsErrorHandler`.
+            CredentialError::NotFound => crate::driver::exit::CONFIG,
+            // botocore `InvalidConfigError`, `PartialCredentialsError` and
+            // the retrieval errors reach `GeneralExceptionHandler`.
+            CredentialError::Config(_) | CredentialError::Retrieval(_) => {
+                crate::driver::exit::GENERAL
+            }
         }
     }
 }

@@ -115,7 +115,7 @@ complete -c awsr -f -a '(begin; set -lx COMP_LINE (commandline -cp); awsr_comple
 - help: 本家の man ページと同じ構成 (説明、構文、オプション、グローバルオプション、例、出力)
 - TLS: `--no-verify-ssl`、`--ca-bundle` / `AWS_CA_BUNDLE` / プロファイルの `ca_bundle`
 - `--help` (どの階層でも `help` と同じページ)、`auth_scheme_preference` (`AWS_AUTH_SCHEME_PREFERENCE`)
-- 終了コード: 0 / 252 (引数エラー) / 253 (設定エラー) / 254 (サービスエラー) / 255 (その他)
+- 終了コード: 0 / 252 (引数エラー) / 253 (設定エラー) / 254 (サービスエラー) / 255 (その他)。本家と同じく 253 になるのはリージョン未設定、認証情報が見つからない、`aws login` の既存認証情報、`sso login` の SSO 設定不備だけ。存在しないプロファイルや認証情報設定の誤り (`source_profile` と `credential_source` の併記など) は 255
 
 ## ライセンス
 
