@@ -38,7 +38,7 @@ jobs:
       skip: ${{ steps.target.outputs.skip }}
       status: ${{ steps.test.outputs.status }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -82,7 +82,7 @@ jobs:
           sudo apt-get install -y -q mandoc
           pipx install uv
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: steps.target.outputs.skip == 'false'
         with:
           path: |
@@ -116,7 +116,7 @@ jobs:
           git diff --cached --binary -- upstream.lock assets/cli.json tests/fixtures > target/sync/changes.patch
           cp target/upstream-summary.md target/test.log target/sync/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.target.outputs.skip == 'false'
         with:
           name: upstream-sync
@@ -132,9 +132,9 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: upstream-sync
           path: ${{ runner.temp }}/sync
